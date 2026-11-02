@@ -37,8 +37,11 @@ import { NightDriver1976Stage } from './stages/NightDriver1976Stage';
 import { Galaxian1979Stage } from './stages/Galaxian1979Stage';
 import { CircuitoAnfibio1979Stage } from './stages/CircuitoAnfibio1979Stage';
 import { IslaNatalStage } from './stages/IslaNatalStage';
+import { BedroomStage } from './stages/BedroomStage';
+import { ComedorStage } from './stages/ComedorStage';
 import { Origin70sIsland, Island70sArrivalMode } from './island/Origin70sIsland';
 import { ISLA_NATAL_FLAGS } from './island/islaNatalData';
+import { COMEDOR_FLAGS } from './stages/comedor/comedorData';
 import { MainMenu, NewGameConfirmDialog } from './menu/MainMenu';
 import { drawPixelAvatar4Dir } from './island/island70sRenderer';
 import type { FacingDirection } from './rpg/rpgContent';
@@ -102,6 +105,8 @@ type IslandArrivalMode = Island70sArrivalMode;
 
 type ViewStateId =
   | 'state-cinematic'
+  | 'state-bedroom'
+  | 'state-comedor'
   | 'state-title'
   | 'state-avatar'
   | 'state-isla-natal'
@@ -236,6 +241,8 @@ class GameManager {
   private currentState: ViewStateId = 'state-cinematic';
   private allStates: ViewStateId[] = [
     'state-cinematic',
+    'state-bedroom',
+    'state-comedor',
     'state-title',
     'state-avatar',
     'state-isla-natal',
@@ -500,10 +507,13 @@ export default function App() {
   const [activeState, setActiveState] = useState<ViewStateId>('state-cinematic');
   const [cinematicRunKey, setCinematicRunKey] = useState<number>(1);
   const [natalSessionKey, setNatalSessionKey] = useState<number>(1);
+  const [comedorSessionKey, setComedorSessionKey] = useState<number>(1);
+  /** Pixel vuelve al comedor desde el exterior nocturno de Isla Natal. */
+  const [comedorReturnFromIsland, setComedorReturnFromIsland] = useState<boolean>(false);
   // La cinemática inicial presenta el prólogo cósmico antes del menú principal.
   const [cinematicSegment, setCinematicSegment] = useState<{ start: number; end: number }>({
     start: 0,
-    end: 94,
+    end: 104,
   });
   const pendingEncounterIntroRef = useRef(false);
   // Estado persistente de aventura e historial
@@ -657,6 +667,20 @@ export default function App() {
     } else if (activeState === 'state-galaxian') {
       setProgressState((prev) => markGameStarted(prev, 'galaxian'));
     }
+  }, [activeState]);
+
+  // Evita que el foco de una pantalla previa deje el contenedor desplazado
+  // (banda negra bajo el canvas y supuesto "desplazamiento de cámara").
+  useEffect(() => {
+    const container = document.getElementById('game-container');
+    if (!container) return;
+    const resetScroll = () => {
+      container.scrollTop = 0;
+      container.scrollLeft = 0;
+    };
+    resetScroll();
+    const frame = requestAnimationFrame(resetScroll);
+    return () => cancelAnimationFrame(frame);
   }, [activeState]);
 
   useEffect(() => {
@@ -822,8 +846,13 @@ export default function App() {
       managerRef.current?.transitionTo('state-isla-natal');
       return;
     }
+    // La primera vez, la cinemática desemboca en el prólogo jugable del dormitorio.
+    if (!progressState.island70s.narrativeEvents.includes('prologo-dormitorio-despertar')) {
+      managerRef.current?.transitionTo('state-bedroom');
+      return;
+    }
     managerRef.current?.transitionTo('state-title');
-  }, [cinematicSegment.start]);
+  }, [cinematicSegment.start, progressState.island70s.narrativeEvents]);
 
   const handleReplayCinematic = useCallback(() => {
     retroAudio.uiClick();
@@ -843,9 +872,11 @@ export default function App() {
     retroAudio.uiClick();
     if (pendingEncounterIntroRef.current) {
       pendingEncounterIntroRef.current = false;
-      // Partida nueva: comienza directamente dentro de la casa de Pixel en Isla Natal.
+      // Partida nueva: el prólogo jugable empieza en el dormitorio de Pixel.
       setIslandArrivalMode('awakening');
-      managerRef.current?.transitionTo('state-isla-natal');
+      setComedorReturnFromIsland(false);
+      setNatalArrivalFromOrigen(false);
+      managerRef.current?.transitionTo('state-bedroom');
       return;
     }
     const natalEvents = progressState.island70s.narrativeEvents;
@@ -998,6 +1029,47 @@ export default function App() {
     ISLA_NATAL_FLAGS.departed
   );
 
+  // Noche del prólogo: la tormenta cubre la Isla Natal desde que Pixel sale de
+  // su casa. Termina definitivamente cuando el enviado se marcha y la nube
+  // negra se disipa; una vez marcada, no vuelve al entrar o salir de la casa.
+  const prologueNightActive =
+    progressState.island70s.narrativeEvents.includes('prologo-dormitorio-despertar') &&
+    !progressState.island70s.narrativeEvents.includes(ISLA_NATAL_FLAGS.stormCleared) &&
+    !progressState.island70s.narrativeEvents.includes(ISLA_NATAL_FLAGS.pongWon) &&
+    !islaNatalCompleted;
+
+  // Migración del cofre unificado: las partidas que abrieron el cofre del
+  // comedor antes de unificar la cabaña conservan su estado, reciben los
+  // objetos canónicos que falten y marcan la bandera que usa Pong. La palanca
+  // no se devuelve si ya fue instalada o consumida.
+  useEffect(() => {
+    const events = progressState.island70s.narrativeEvents;
+    if (!events.includes(COMEDOR_FLAGS.chestOpened)) return;
+    const hasCanonicalFlag = events.includes(ISLA_NATAL_FLAGS.chestOpened);
+    const leverNeeded =
+      !events.includes(ISLA_NATAL_FLAGS.leverInstalled) &&
+      !events.includes(ISLA_NATAL_FLAGS.pongWon);
+    const requiredItems = [
+      'item-carta-abuelo',
+      'item-foto-abuelo',
+      'item-lampara-fosforo',
+      ...(leverNeeded ? ['item-palanca-pong'] : []),
+    ];
+    const missingItems = requiredItems.filter(
+      (id) => !progressState.rpg.inventoryItems.includes(id)
+    );
+    if (hasCanonicalFlag && missingItems.length === 0) return;
+    setProgressState((prev) => {
+      const next = hasCanonicalFlag
+        ? prev
+        : recordNarrativeEvent(prev, ISLA_NATAL_FLAGS.chestOpened);
+      return missingItems.length > 0 ? grantInventoryItems(next, missingItems) : next;
+    });
+  }, [
+    progressState.island70s.narrativeEvents,
+    progressState.rpg.inventoryItems,
+  ]);
+
   const handleConfirmNewGame = useCallback(() => {
     retroAudio.uiClick();
     setNewGameConfirmOpen(false);
@@ -1043,13 +1115,24 @@ export default function App() {
   const handleContinueSavedGame = useCallback(() => {
     if (!hasSavedProgress) return;
     retroAudio.uiClick();
+    const natalEvents = progressState.island70s.narrativeEvents;
+    // Prólogo en curso: si Pixel todavía no salió de la casa, se retoma en el comedor.
+    if (
+      natalEvents.includes('prologo-dormitorio-despertar') &&
+      !natalEvents.includes(ISLA_NATAL_FLAGS.firstLight)
+    ) {
+      setComedorReturnFromIsland(false);
+      setComedorSessionKey((k) => k + 1);
+      managerRef.current?.transitionTo('state-comedor');
+      return;
+    }
     if (!islaNatalCompleted) {
       managerRef.current?.transitionTo('state-isla-natal');
       return;
     }
     setIslandArrivalMode('standard');
     managerRef.current?.transitionTo('state-archipelago');
-  }, [hasSavedProgress, islaNatalCompleted]);
+  }, [hasSavedProgress, islaNatalCompleted, progressState.island70s.narrativeEvents]);
 
   const handleRecordIslaNatalEvent = useCallback((eventId: string) => {
     setProgressState((prev) => {
@@ -1063,6 +1146,29 @@ export default function App() {
     // Llegada a la Isla del Origen surcando la Barra de Pong: descenso y bajada de la tabla.
     setIslandArrivalMode('pong-board');
     managerRef.current?.transitionTo('state-archipelago');
+  }, []);
+
+  /** La puerta de la habitación abre al comedor de la casa. */
+  const handleEnterComedor = useCallback(() => {
+    setComedorReturnFromIsland(false);
+    setComedorSessionKey((k) => k + 1);
+    managerRef.current?.transitionTo('state-comedor');
+  }, []);
+
+  /** La puerta principal del comedor lleva al exterior nocturno de Isla Natal. */
+  const handleExitComedorToIslaNatal = useCallback(() => {
+    setIslandArrivalMode('awakening');
+    setNatalArrivalFromOrigen(false);
+    setComedorReturnFromIsland(false);
+    setNatalSessionKey((k) => k + 1);
+    managerRef.current?.transitionTo('state-isla-natal');
+  }, []);
+
+  /** Desde el porche de Isla Natal, Pixel vuelve a entrar al comedor. */
+  const handleReturnToComedor = useCallback(() => {
+    setComedorReturnFromIsland(true);
+    setComedorSessionKey((k) => k + 1);
+    managerRef.current?.transitionTo('state-comedor');
   }, []);
 
   const handleTravelOrigenToNatal = useCallback(() => {
@@ -1155,7 +1261,9 @@ export default function App() {
       {/* Insignia de Logro Visual: Arquitecto Legendario (oculta durante la exploración del mapa para mantener la vista despejada) */}
       {masterUnlocked &&
         activeState !== 'state-archipelago' &&
-        activeState !== 'state-cinematic' && (
+        activeState !== 'state-cinematic' &&
+        activeState !== 'state-bedroom' &&
+        activeState !== 'state-comedor' && (
           <div className="fixed top-4 left-4 z-40 flex items-center gap-2 px-3.5 py-1.5 rounded-md glass-panel border border-[#00f3ff] shadow-[0_0_24px_rgba(0,243,255,0.75)] animate-pulse">
             <Sparkles
               className="w-4 h-4 text-amber-300 animate-spin"
@@ -1176,7 +1284,9 @@ export default function App() {
       )}
 
       {/* Botón compacto de Configuración en esquina superior derecha (vista limpia y despejada) */}
-      {activeState !== 'state-cinematic' && (
+      {activeState !== 'state-cinematic' &&
+        activeState !== 'state-bedroom' &&
+        activeState !== 'state-comedor' && (
         <div className="fixed top-3.5 right-3.5 z-40 flex items-center gap-2">
           {hasInvaders1000Achievement && activeState !== 'state-archipelago' && (
             <div
@@ -1572,6 +1682,48 @@ export default function App() {
       </section>
 
       {/* =========================================================
+          ESTADO 1B: PRÓLOGO · EL DESPERTAR (DORMITORIO DE PIXEL)
+         ========================================================= */}
+      <section id="state-bedroom" className="view-state z-10">
+        {windowReady && activeState === 'state-bedroom' && (
+          <BedroomStage
+            skinColor={skinColor}
+            hairColor={hairColor}
+            shirtColor={shirtColor}
+            appearance={avatarAppearance}
+            onExitToTitle={() => managerRef.current?.transitionTo('state-title')}
+            onWake={() =>
+              setProgressState((prev) =>
+                recordNarrativeEvent(prev, 'prologo-dormitorio-despertar')
+              )
+            }
+            onEnterComedor={handleEnterComedor}
+          />
+        )}
+      </section>
+
+      {/* =========================================================
+          ESTADO 1C: PRÓLOGO · EL COMEDOR (COFRE, MOCHILA Y TORMENTA)
+         ========================================================= */}
+      <section id="state-comedor" className="view-state z-10">
+        {windowReady && activeState === 'state-comedor' && (
+          <ComedorStage
+            key={comedorSessionKey}
+            skinColor={skinColor}
+            hairColor={hairColor}
+            shirtColor={shirtColor}
+            appearance={avatarAppearance}
+            narrativeEvents={progressState.island70s.narrativeEvents}
+            onRecordNarrativeEvent={handleRecordIslaNatalEvent}
+            onGrantInventoryItems={handleGrantIslaNatalItems}
+            arriveFromExterior={comedorReturnFromIsland}
+            onExitToIslaNatal={handleExitComedorToIslaNatal}
+            onExitToTitle={() => managerRef.current?.transitionTo('state-title')}
+          />
+        )}
+      </section>
+
+      {/* =========================================================
           ESTADO 2: PANTALLA DE TÍTULO (ISLA MULTIVERSO + START, CONTINUAR, CÓDIGO)
          ========================================================= */}
       <section
@@ -1763,12 +1915,15 @@ export default function App() {
               shirtColor={shirtColor}
               appearance={avatarAppearance}
               narrativeEvents={progressState.island70s.narrativeEvents}
+              inventoryItems={progressState.rpg.inventoryItems}
               onRecordNarrativeEvent={handleRecordIslaNatalEvent}
               onDepartToOrigin={handleDepartIslaNatal}
               arrivedFromOrigen={natalArrivalFromOrigen}
               onArrivalNoticeShown={() => setNatalArrivalFromOrigen(false)}
               onGrantInventoryItems={handleGrantIslaNatalItems}
               onConsumeInventoryItems={handleConsumeIslaNatalItems}
+              prologueNight={prologueNightActive}
+              onReturnToComedor={handleReturnToComedor}
             />
           </SceneGuard>
         )}

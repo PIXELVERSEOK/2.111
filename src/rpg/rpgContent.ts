@@ -499,7 +499,7 @@ export const RPG_ITEMS: Record<string, RpgItemSpec> = {
     accentHex: '#b07a4a',
     shortCode: 'MOC-70',
     description:
-      'La vieja mochila de lona que colgaba junto a la ventana de la cabaña natal. Curtida por la sal, guarda el equipo por defecto de Pixel: la Bitácora de la Isla del Origen, una cantimplora de hojalata, una brújula de latón y un ovillo de cuerda.',
+      'La vieja mochila de lona que estaba junto al cofre del abuelo, en el comedor de la casa natal. Curtida por la sal, guarda el equipo por defecto de Pixel: la Bitácora de la Isla del Origen, una cantimplora de hojalata, una brújula de latón y un ovillo de cuerda.',
     usageHint: 'Viaja siempre contigo. El inventario se abre con [ENTER] durante la exploración de la Isla del Origen.',
     usableAction: 'inspect',
   },
@@ -511,7 +511,7 @@ export const RPG_ITEMS: Record<string, RpgItemSpec> = {
     accentHex: '#facc15',
     shortCode: 'LMP-72',
     description:
-      'Farol clásico alimentado por el pulso de Pong (1972). Disipa la oscuridad en cuevas húmedas y permite abrir cofres ocultos en la penumbra.',
+      'Farol clásico que el abuelo guardó en el cofre del comedor. Su luz se alimenta del pulso de Pong y disipa la oscuridad en cuevas húmedas y cofres ocultos en la penumbra.',
     usageHint: 'Pulsa [USAR] o la tecla [L] para encender/apagar el halo de luz alrededor de Pixel.',
     usableAction: 'lantern',
     grantsAbility: 'phosphor-lantern',
@@ -744,7 +744,7 @@ export const RPG_ITEMS: Record<string, RpgItemSpec> = {
     accentHex: '#f59e0b',
     shortCode: 'PLC-72',
     description:
-      'Palanca de hierro forjado que el abuelo de Pixel guardó dentro del cofre familiar. Encaja en la ranura del gabinete de Pong y transmite el pulso necesario para despertar el tubo.',
+      'Palanca de hierro forjado que el abuelo de Pixel guardó dentro del cofre del comedor. Encaja en la ranura del gabinete de Pong y transmite el pulso necesario para despertar el tubo.',
     usageHint: 'Llévala al gabinete de la arboleda, en la Isla Natal, e instálala para encender Pong.',
     usableAction: 'inspect',
   },
@@ -756,7 +756,7 @@ export const RPG_ITEMS: Record<string, RpgItemSpec> = {
     accentHex: '#fde68a',
     shortCode: 'CRT-72',
     description:
-      'Carta manuscrita encontrada dentro del cofre, bajo el retrato familiar. Explica qué fue el Reinicio Cero, por qué el viejo Pong sobrevivió y cuál es la misión de Pixel.',
+      'Carta manuscrita encontrada dentro del cofre del comedor. Explica qué fue el Reinicio Cero, por qué el viejo Pong sobrevivió y cuál es la misión de Pixel.',
     usageHint: 'Consérvala. La carta completa se lee al abrir el cofre; en el inventario queda como testimonio.',
     usableAction: 'inspect',
   },
@@ -994,10 +994,10 @@ export const RPG_ITEMS: Record<string, RpgItemSpec> = {
     category: 'cinta-memoria',
     categoryLabel: 'NOTAS DE MISIÓN',
     accentHex: '#facc15',
-    shortCode: 'COD-1972',
+    shortCode: 'COD-287',
     description:
-      'Nota entregada por el enviado del futuro. Registra el código del cofre del abuelo: 1972. Objeto permanente.',
-    usageHint: 'Consúltala desde el inventario para recordar la combinación del cofre (1972).',
+      'Nota entregada por el enviado del futuro. Registra el código del cofre del abuelo: 287. Objeto permanente.',
+    usageHint: 'Consúltala desde el inventario para recordar la combinación del cofre (287).',
     usableAction: 'inspect',
   },
 };

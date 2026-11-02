@@ -480,50 +480,45 @@ function drawVxLegsAndBoots(
     const leftStep = frame === 0;
     const rightStep = frame === 2;
 
-    // Pierna izquierda (x = -4..-2)
-    const lyTop = -5;
-    const lyBot = leftStep ? 1 : rightStep ? -1 : 0;
-    g.box(-4, lyTop, -2, lyTop + 2, pants.base);
-    g.px(-4, lyTop, pants.deep);
-    g.px(-2, lyTop + 1, pants.mid);
+    /**
+     * Pierna frontal/trasera con zancada legible: la pierna que avanza apoya la bota
+     * una fila por debajo del eje y abre 1px la postura; la que retrocede se eleva
+     * tres filas y se sombrea, de modo que los pies alternan altura en cada paso.
+     */
+    const drawFrontLeg = (side: -1 | 1, state: 'fwd' | 'back' | 'idle') => {
+      const outer = side === -1 ? -4 : 4;
+      const inner = side === -1 ? -2 : 2;
+      const spread = state === 'fwd' ? side : 0;
+      const x1 = outer + spread;
+      const x2 = inner + spread;
+      const top = -5;
+      const bot = state === 'fwd' ? 1 : state === 'back' ? -2 : 0;
+      const lifted = state === 'back';
 
-    // Bota izquierda
-    const lBootTop = lyBot - 2;
-    g.hline(-4, -2, lBootTop, boots.light);
-    g.box(-4, lBootTop + 1, -2, lyBot, boots.base);
-    g.px(-4, lyBot, boots.deep);
-    if (isDown && !rightStep) {
-      g.px(-3, lBootTop + 1, boots.spec);
-      g.px(-2, lBootTop + 1, boots.light);
-    } else if (!isDown && leftStep) {
-      // Suela levantada vista desde atrás
-      g.hline(-4, -2, lyBot, sole);
-    }
-    g.hline(-4, -2, lyBot + 1, sole);
-    g.vline(-5, lyTop, lyBot, DARK_OUTLINE);
-    g.vline(-1, lyTop + 1, lyBot, DARK_OUTLINE);
+      // Muslo y pantalón: la pierna retrasada queda en sombra.
+      g.box(x1, top, x2, top + 2, lifted ? pants.mid : pants.base);
+      g.px(x1, top, pants.deep);
+      g.px(x2, top + 1, lifted ? pants.deep : pants.mid);
 
-    // Pierna derecha (x = +2..+4)
-    const ryTop = -5;
-    const ryBot = rightStep ? 1 : leftStep ? -1 : 0;
-    g.box(2, ryTop, 4, ryTop + 2, pants.base);
-    g.px(4, ryTop, pants.deep);
-    g.px(2, ryTop + 1, pants.mid);
+      // Bota: la retrasada se eleva y pierde el brillo de contacto.
+      const bootTop = bot - 2;
+      g.hline(x1, x2, bootTop, lifted ? boots.mid : boots.light);
+      g.box(x1, bootTop + 1, x2, bot, lifted ? boots.mid : boots.base);
+      g.px(x1, bot, boots.deep);
+      if (isDown && !lifted && state !== 'idle') {
+        g.px(x1 + 1, bootTop + 1, boots.spec);
+        g.px(x2, bootTop + 1, boots.light);
+      } else if (!isDown && !lifted && state !== 'idle') {
+        // Suela que se ve al adelantar el pie de espaldas.
+        g.hline(x1, x2, bot, sole);
+      }
+      g.hline(x1, x2, bot + 1, sole);
+      g.vline(x1 - 1, top, bot, DARK_OUTLINE);
+      g.vline(x2 + 1, top + 1, bot, DARK_OUTLINE);
+    };
 
-    // Bota derecha
-    const rBootTop = ryBot - 2;
-    g.hline(2, 4, rBootTop, boots.light);
-    g.box(2, rBootTop + 1, 4, ryBot, boots.base);
-    g.px(4, ryBot, boots.deep);
-    if (isDown && !leftStep) {
-      g.px(3, rBootTop + 1, boots.spec);
-      g.px(2, rBootTop + 1, boots.light);
-    } else if (!isDown && rightStep) {
-      g.hline(2, 4, ryBot, sole);
-    }
-    g.hline(2, 4, ryBot + 1, sole);
-    g.vline(5, ryTop, ryBot, DARK_OUTLINE);
-    g.vline(1, ryTop + 1, ryBot, DARK_OUTLINE);
+    drawFrontLeg(-1, leftStep ? 'fwd' : rightStep ? 'back' : 'idle');
+    drawFrontLeg(1, rightStep ? 'fwd' : leftStep ? 'back' : 'idle');
 
     // Entrepierna y faldón si lleva túnica
     g.px(0, -5, DARK_OUTLINE);
@@ -551,29 +546,35 @@ function drawVxLegsAndBoots(
       g.px(mx(4), -1, DARK_OUTLINE);
       g.px(mx(4), 0, DARK_OUTLINE);
     } else {
-      // Zancada lateral: pierna lejana (más oscura) + pierna cercana (iluminada)
+      // Zancada lateral: pierna lejana (más oscura) + pierna cercana (iluminada).
+      // La pierna que retrocede se eleva una fila para que el apoyo alterne de verdad.
       const nearForward = frame === 0;
       const farDx = nearForward ? -3 : 3;
       const nearDx = nearForward ? 3 : -3;
+      const farLifted = nearForward;
+      const nearLifted = !nearForward;
 
       // 1. Pierna lejana
       g.box(mx(farDx - 1), -5, mx(farDx + 1), -3, pants.deep);
-      g.box(mx(farDx - 1), -2, mx(farDx + 2), -1, boots.mid);
-      g.px(mx(farDx + 2), -1, boots.base);
-      g.hline(mx(farDx - 1), mx(farDx + 2), 0, sole);
-      g.vline(mx(farDx - 2), -5, -1, DARK_OUTLINE);
-      g.px(mx(farDx + 3), -1, DARK_OUTLINE);
+      const farBootTop = farLifted ? -2 : -1;
+      const farBot = farLifted ? -1 : 0;
+      g.box(mx(farDx - 1), farBootTop, mx(farDx + 2), farBot, boots.mid);
+      g.px(mx(farDx + 2), farBot, boots.base);
+      g.hline(mx(farDx - 1), mx(farDx + 2), farBot + 1, sole);
+      g.vline(mx(farDx - 2), -5, farBot, DARK_OUTLINE);
+      g.px(mx(farDx + 3), farBot, DARK_OUTLINE);
 
       // 2. Pierna cercana en primer plano
       g.box(mx(nearDx - 1), -5, mx(nearDx + 1), -3, pants.base);
       g.px(mx(nearDx - 1), -4, pants.mid);
-      g.hline(mx(nearDx - 1), mx(nearDx + 1), -2, boots.light);
-      g.box(mx(nearDx - 1), -1, mx(nearDx + 2), 0, boots.base);
-      g.px(mx(nearDx + 1), -1, boots.spec);
-      g.hline(mx(nearDx - 1), mx(nearDx + 2), 1, sole);
-      g.vline(mx(nearDx - 2), -5, 0, DARK_OUTLINE);
-      g.px(mx(nearDx + 3), -1, DARK_OUTLINE);
-      g.px(mx(nearDx + 3), 0, DARK_OUTLINE);
+      const nearBootTop = nearLifted ? -3 : -2;
+      const nearBot = nearLifted ? -1 : 0;
+      g.hline(mx(nearDx - 1), mx(nearDx + 1), nearBootTop, boots.light);
+      g.box(mx(nearDx - 1), nearBootTop + 1, mx(nearDx + 2), nearBot, boots.base);
+      g.px(mx(nearDx + 1), nearBootTop + 1, boots.spec);
+      g.hline(mx(nearDx - 1), mx(nearDx + 2), nearBot + 1, sole);
+      g.vline(mx(nearDx - 2), -5, nearBot, DARK_OUTLINE);
+      g.px(mx(nearDx + 3), nearBot, DARK_OUTLINE);
     }
 
     if (robeHemColor) {
@@ -846,8 +847,8 @@ function drawVxArms(
     const leftForward = isDown ? frame === 2 : frame === 0;
     const rightForward = isDown ? frame === 0 : frame === 2;
 
-    const lSwing = leftForward ? 1 : frame === 1 ? 0 : -1;
-    const rSwing = rightForward ? 1 : frame === 1 ? 0 : -1;
+    const lSwing = leftForward ? 2 : frame === 1 ? 0 : -2;
+    const rSwing = rightForward ? 2 : frame === 1 ? 0 : -2;
     const reach = isDown ? interactReach : 0;
 
     // Brazo izquierdo (x = -9..-8, separado del torso por pliegue de 1px en x = -7)
@@ -1770,11 +1771,19 @@ export function renderPixelVxAce4Dir(
   const prevSmoothing = ctx.imageSmoothingEnabled;
   ctx.imageSmoothingEnabled = false;
 
-  // 1. Sombra pixelada escalonada de contacto en el suelo (coherente con VX Ace)
+  // 1. Sombra pixelada escalonada de contacto en el suelo (coherente con VX Ace).
+  // Durante la caminata el apoyo alterna: la sombra acompaña levemente la zancada.
+  const strideBias = walking && !reducedMotion ? (frame === 0 ? -1 : frame === 2 ? 1 : 0) : 0;
   ctx.fillStyle = 'rgba(6, 10, 18, 0.24)';
-  ctx.fillRect(rx - 9, ry, 18, 4);
+  ctx.fillRect(rx - 9 + strideBias, ry, 18, 4);
   ctx.fillStyle = 'rgba(6, 10, 18, 0.42)';
-  ctx.fillRect(rx - 6, ry + 1, 12, 3);
+  ctx.fillRect(rx - 6 + strideBias, ry + 1, 12, 3);
+  if (walking && !reducedMotion) {
+    // Huella de contacto del pie que apoya, para reforzar el paso.
+    const plantedX = frame === 2 ? 3 : -3;
+    ctx.fillStyle = 'rgba(6, 10, 18, 0.34)';
+    ctx.fillRect(rx + plantedX - 2, ry + 2, 5, 2);
+  }
 
   // 2. Halo de la Lámpara de Fósforo cuando está encendida en grutas o noche
   if (opts?.lanternActive) {

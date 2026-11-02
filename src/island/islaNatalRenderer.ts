@@ -34,6 +34,7 @@ import {
   ISLA_NATAL_PATH_PLAZAS,
   ISLA_NATAL_PATH_ROUTES,
   ISLA_NATAL_PEBBLES,
+  ISLA_NATAL_POIS,
   ISLA_NATAL_SHELLS,
   ISLA_NATAL_SIGNS,
   ISLA_NATAL_SOLIDS,
@@ -45,6 +46,7 @@ import {
   ISLA_NATAL_WORLD_W,
   isIslaNatalPointOnLand,
   isIslaNatalPointOnPath,
+  isIslaNatalPointBlockedBySolid,
   type IslaNatalClutter,
   type IslaNatalPathPlaza,
   type IslaNatalPathRoute,
@@ -52,6 +54,12 @@ import {
   type IslaNatalSurface,
   type IslaNatalWalkRect,
 } from './islaNatalData';
+import {
+  NATAL_ISLAND_RING,
+  pointInPolygonRing,
+  subdivideClosedCatmullRom,
+  type Vec2,
+} from './islaNatalCoast';
 
 export type ArcadeCabinetState = 'dusty' | 'powered' | 'won';
 
@@ -114,6 +122,12 @@ export interface IslaNatalRenderParams {
     phase: 'storm' | 'arrival' | 'descend' | 'talk' | 'board' | 'departure';
     t: number;
   } | null;
+  /** Enviado del prólogo esperando fuera de la casa (sólo de noche). */
+  envoy?: { x: number; y: number } | null;
+  /** Reacción de sorpresa de Pixel al descubrir al enviado: signo «!» y respingo. */
+  surprise?: boolean;
+  /** Noche de tormenta del prólogo: destello actual (0..1) y tiempo de escena. */
+  nightStorm?: { t: number; flash: number; fade?: number } | null;
 }
 
 const CELL = 32;
@@ -122,6 +136,8 @@ const CABINET_POS = { x: 1697, y: 794 };
 const HUT_POS = { x: 596, y: 952 };
 const SHED_POS = { x: 1624, y: 718 };
 const HUERTA_RECT = { x: 1068, y: 940, w: 216, h: 98 };
+/** Huerta central: ocupa el claro donde terminan los cuatro senderos del anillo. */
+const HUERTA_SPRITE_RECT = { x: 1016, y: 874, w: 320, h: 242 };
 const SIGN_POS = { x: 1246, y: 1324 };
 const NET_POS = { x: 1036, y: 1340 };
 const SHELLS_POI_POS = { x: 1318, y: 1358 };
@@ -160,44 +176,6 @@ function hash2(x: number, y: number): number {
 /* GEOMETRÍA ORGÁNICA DE LA ISLA: CONTORNOS ASIMÉTRICOS Y PLAYAS       */
 /* ------------------------------------------------------------------ */
 
-type Vec2 = readonly [number, number];
-
-function catmullRom1D(p0: number, p1: number, p2: number, p3: number, t: number): number {
-  const t2 = t * t;
-  const t3 = t2 * t;
-  return (
-    0.5 *
-    (2 * p1 +
-      (-p0 + p2) * t +
-      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
-      (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
-  );
-}
-
-/** Subdivide un polígono cerrado de control en una curva orgánica suave sin esquinas duras. */
-function subdivideClosedCatmullRom(
-  control: readonly Vec2[],
-  samplesPerSegment = 9
-): [number, number][] {
-  const n = control.length;
-  if (n < 3) return control.map((p) => [p[0], p[1]]);
-  const out: [number, number][] = [];
-  for (let i = 0; i < n; i++) {
-    const p0 = control[(i - 1 + n) % n];
-    const p1 = control[i];
-    const p2 = control[(i + 1) % n];
-    const p3 = control[(i + 2) % n];
-    for (let s = 0; s < samplesPerSegment; s++) {
-      const t = s / samplesPerSegment;
-      out.push([
-        catmullRom1D(p0[0], p1[0], p2[0], p3[0], t),
-        catmullRom1D(p0[1], p1[1], p2[1], p3[1], t),
-      ]);
-    }
-  }
-  return out;
-}
-
 function tracePolygonRing(ctx: CanvasRenderingContext2D, ring: readonly Vec2[]): void {
   if (ring.length === 0) return;
   ctx.moveTo(ring[0][0], ring[0][1]);
@@ -207,66 +185,23 @@ function tracePolygonRing(ctx: CanvasRenderingContext2D, ring: readonly Vec2[]):
   ctx.closePath();
 }
 
-function pointInPolygonRing(x: number, y: number, ring: readonly Vec2[]): boolean {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i][0];
-    const yi = ring[i][1];
-    const xj = ring[j][0];
-    const yj = ring[j][1];
-    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-9) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
 /**
- * Silueta exterior ampliada un 40 % (2352 × 1736) y equilibrada con armonía natural
- * alrededor del eje central (x = 1176): bahías curvas al norte y al sur, alas costeras
- * compensadas al suroeste y sureste, promontorio rocoso al noroeste y península boscosa al noreste.
+ * Pequeños escollos y cayos costeros que equilibran la composición frente a los
+ * cabos de la silueta nueva, sin invadir el canal del muelle.
  */
-const NATAL_ISLAND_CONTROL_POINTS: readonly Vec2[] = [
-  // Norte: Bahía del Puerto (Suavizada)
-  [1100, 640],
-  [1176, 655],
-  [1250, 640],
-  // Noreste: Curva hacia la Arboleda
-  [1400, 620],
-  [1600, 580],
-  [1800, 600],
-  [1950, 680],
-  [2000, 850],
-  // Este: Península boscosa redondeada
-  [1980, 1000],
-  [1900, 1150],
-  [1800, 1280],
-  // Sureste: Hacia el Mirador del Oleaje
-  [1650, 1380],
-  [1500, 1420],
-  // Sur: Gran Bahía de la Playa del Aurora (Circular y amplia)
-  [1176, 1450],
-  [850, 1420],
-  [700, 1380],
-  // Suroeste: Curva hacia la casa
-  [550, 1280],
-  [450, 1150],
-  [430, 1000],
-  // Oeste: Costa de la pradera
-  [450, 850],
-  [420, 700],
-  // Noroeste: Promontorio del Alto de las Rocas (Irregular pero circularizado)
-  [380, 600],
-  [400, 450],
-  [500, 360],
-  [650, 330],
-  [800, 360],
-  [900, 450],
-  [950, 600],
-  [1020, 640],
-];
-
-/** Pequeños escollos y cayos costeros equilibrados frente a los cabos de la isla ampliada. */
 const NATAL_COASTAL_SKERRIES: readonly { surface: IslaNatalSurface; points: readonly Vec2[] }[] = [
+  {
+    surface: 'rock',
+    points: [
+      [244, 690],
+      [262, 676],
+      [282, 682],
+      [290, 700],
+      [278, 716],
+      [256, 720],
+      [240, 706],
+    ],
+  },
   {
     surface: 'rock',
     points: [
@@ -319,73 +254,117 @@ const NATAL_COASTAL_SKERRIES: readonly { surface: IslaNatalSurface; points: read
       [1752, 1344],
     ],
   },
+  {
+    surface: 'rock',
+    points: [
+      [1218, 1600],
+      [1238, 1590],
+      [1256, 1598],
+      [1260, 1614],
+      [1242, 1626],
+      [1222, 1622],
+      [1208, 1610],
+    ],
+  },
+  {
+    surface: 'rock',
+    points: [
+      [2082, 930],
+      [2100, 918],
+      [2118, 926],
+      [2120, 946],
+      [2102, 958],
+      [2084, 950],
+    ],
+  },
 ];
 
 /**
- * Contorno curvo y equilibrado de la pradera interior: se retira tierra adentro frente a las
- * bahías para formar playas curvas naturales y envuelve de forma simétrica los bosques laterales.
+ * Borde de la pradera interior: acompaña la nueva costa con lóbulos hacia el bosque
+ * del este y una amplia franja de arena en la playa del Aurora y la cala de la casa.
+ * Cubre con holgura todas las zonas caminables de césped.
  */
 const NATAL_MEADOW_CONTROL_POINTS: readonly Vec2[] = [
-  // Bahía Norte
-  [1100, 680],
-  [1176, 690],
-  [1250, 680],
-  // Noreste: Interior de la Arboleda
-  [1400, 660],
-  [1550, 620],
-  [1750, 640],
-  [1880, 720],
-  [1920, 850],
-  // Este: Borde boscoso
-  [1900, 1000],
-  [1820, 1120],
-  // Sureste: Transición al Mirador
-  [1700, 1220],
-  [1550, 1260],
-  // Sur: Borde de la Playa del Aurora
-  [1350, 1275],
-  [1176, 1270],
-  [1000, 1275],
-  // Suroeste: Transición hacia la casa
-  [800, 1260],
-  [650, 1220],
-  [530, 1120],
-  [480, 1000],
-  // Oeste: Borde de la pradera
-  [500, 850],
-  [470, 720],
-  // Noroeste: Bajo el Alto de las Rocas
-  [550, 750],
-  [750, 750],
-  [850, 720],
-  [950, 680],
-  [1020, 680],
+  // Norte — borde del puerto y claro de la Arboleda
+  [1052, 658],
+  [1176, 672],
+  [1300, 656],
+  [1416, 666],
+  [1520, 644],
+  [1622, 650],
+  [1728, 636],
+  [1830, 650],
+  [1900, 704],
+  // Este — lóbulo boscoso del Mirador
+  [1922, 788],
+  [1926, 878],
+  [1918, 964],
+  [1922, 1050],
+  [1896, 1130],
+  [1814, 1194],
+  [1722, 1236],
+  // Sur — borde festoneado de la Playa del Aurora
+  [1610, 1252],
+  [1540, 1266],
+  [1466, 1250],
+  [1390, 1268],
+  [1300, 1252],
+  [1216, 1268],
+  [1130, 1254],
+  [1044, 1270],
+  [960, 1256],
+  [880, 1268],
+  [820, 1276],
+  // Suroeste — arena amplia alrededor de la casa
+  [760, 1180],
+  [700, 1162],
+  [632, 1140],
+  [570, 1116],
+  [516, 1074],
+  // Oeste — pradera sobre la costa
+  [496, 1010],
+  [494, 944],
+  [502, 884],
+  [512, 838],
+  // Noroeste — pie del Alto de las Rocas
+  [548, 802],
+  [610, 784],
+  [690, 768],
+  [760, 762],
+  [820, 760],
+  [864, 744],
+  [906, 706],
+  [950, 676],
 ];
 
-/** Meseta rocosa orgánica del Alto de las Rocas adaptada al mapa ampliado. */
+/** Meseta rocosa orgánica del Alto de las Rocas con frente marítimo quebrado. */
 const NATAL_ROCK_PLATEAU_CONTROL_POINTS: readonly Vec2[] = [
-  [488, 372],
-  [552, 340],
-  [634, 336],
-  [718, 358],
-  [772, 402],
-  [798, 466],
-  [836, 514],
-  [844, 594],
-  [826, 676],
-  [798, 728],
-  [752, 756],
-  [696, 758],
-  [652, 752],
-  [596, 758],
-  [534, 762],
-  [472, 752],
-  [418, 742],
-  [380, 672],
-  [358, 594],
-  [384, 516],
-  [370, 444],
-  [422, 396],
+  [488, 360],
+  [554, 328],
+  [640, 322],
+  [726, 348],
+  [784, 398],
+  [810, 468],
+  [846, 516],
+  [858, 598],
+  [838, 680],
+  [810, 736],
+  [760, 776],
+  [704, 748],
+  [652, 780],
+  [594, 746],
+  [536, 782],
+  [466, 748],
+  [410, 756],
+  [384, 700],
+  [352, 674],
+  [384, 630],
+  [340, 592],
+  [374, 548],
+  [340, 506],
+  [374, 462],
+  [342, 418],
+  [396, 380],
 ];
 
 /** Terraza superior curva donde se asienta el Mirador del Alto de las Rocas. */
@@ -405,7 +384,6 @@ const NATAL_ROCK_CREST_CONTROL_POINTS: readonly Vec2[] = [
   [474, 418],
 ];
 
-const NATAL_ISLAND_RING = subdivideClosedCatmullRom(NATAL_ISLAND_CONTROL_POINTS, 9);
 const NATAL_SKERRY_RINGS = NATAL_COASTAL_SKERRIES.map((s) => ({
   surface: s.surface,
   ring: subdivideClosedCatmullRom(s.points, 7),
@@ -455,67 +433,200 @@ interface NatalBushSpec {
   y: number;
   seed: number;
   berry: boolean;
+  /** Escala relativa: da jerarquía entre matas de borde y arbustos de grupo. */
+  scale?: number;
 }
-
-// 1. Definimos los puntos centrales precisos (anclajes)
-const puntosEstrategicos = [
-  { x: 1090, y: 695, zona: 'Izquierda del muelle' },
-  { x: 1350, y: 710, zona: 'Derecha del muelle (entrada)' },
-  { x: 596, y: 952, zona: 'Rodeando la casa de techo rojo' },
-  { x: 790, y: 1110, zona: 'Sur del cruce de caminos oeste' },
-  { x: 1318, y: 1358, zona: 'Frontera sur antes de la arena' },
-  // Nuevos puntos marcados en la captura anterior
-  { x: 520, y: 850, zona: 'Borde oeste (entrada cantera)' },
-  { x: 920, y: 720, zona: 'Borde norte (claro izquierdo)' },
-  { x: 1480, y: 670, zona: 'Borde norte (claro derecho)' },
-  { x: 1980, y: 1220, zona: 'Borde sureste (cerca de la costa)' },
-  // Refuerzo de bloques tras eliminar árboles
-  { x: 720, y: 950, zona: 'Lado este casa (antiguo árbol)' },
-  { x: 550, y: 1080, zona: 'Lado suroeste casa (antiguo árbol)' },
-  { x: 850, y: 1050, zona: 'Pradera central (bloque extra)' },
-  { x: 1550, y: 950, zona: 'Pradera este (bloque extra)' },
-];
 
 // Lista final donde guardaremos todos los arbustos válidos
 const NATAL_BUSHES: NatalBushSpec[] = [];
 
-// 3. Validar el terreno antes de plantar
-function esTerrenoValido(x: number, y: number): boolean {
-  // Evitar tapar el buzón (x: 742, y: 1050)
-  const dx = x - 742;
-  const dy = y - 1050;
-  if (dx * dx + dy * dy < 50 * 50) return false;
-
-  // Solo en césped y fuera de los caminos empedrados
-  return isPointOnNatalMeadow(x, y) && !isIslaNatalPointOnPath(x, y);
+/** Secuencia determinista: la vegetación es idéntica en cada visita. */
+function natalBushRand(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
 }
 
-// 2. Generamos los grupos
+/** Zonas que nunca deben quedar tapadas por matorrales. */
+const NATAL_BUSH_KEEPOUTS: { x: number; y: number; r: number }[] = [
+  { x: 742, y: 1050, r: 52 }, // buzón
+  { x: 672, y: 1016, r: 46 }, // puerta de la cabaña
+  { x: 676, y: 1054, r: 40 }, // umbral despejado y plaza de acceso
+  { x: 1176, y: 730, r: 50 }, // llegada del Puerto Norte
+  { x: 1176, y: 1368, r: 68 }, // llegada a la playa
+  { x: 1697, y: 868, r: 48 }, // plaza del arcade
+  { x: 1757, y: 870, r: 42 }, // paleta
+  { x: 910, y: 1084, r: 80 }, // aterrizaje del viajero
+  { x: 1176, y: 1020, r: 42 }, // pozo
+  { x: 1100, y: 980, r: 40 }, // hoguera
+];
+for (const sign of ISLA_NATAL_SIGNS) NATAL_BUSH_KEEPOUTS.push({ x: sign.x, y: sign.y, r: 30 });
+for (const poi of ISLA_NATAL_POIS) NATAL_BUSH_KEEPOUTS.push({ x: poi.x, y: poi.y, r: 34 });
+
+function esTerrenoValidoArbusto(x: number, y: number): boolean {
+  if (!isPointOnNatalMeadow(x, y)) return false;
+  if (isIslaNatalPointOnPath(x, y)) return false;
+  if (isIslaNatalPointBlockedBySolid(x, y)) return false;
+  for (const keep of NATAL_BUSH_KEEPOUTS) {
+    const dx = x - keep.x;
+    const dy = y - keep.y;
+    if (dx * dx + dy * dy < keep.r * keep.r) return false;
+  }
+  return true;
+}
+
+function pushBush(x: number, y: number, rand: () => number, berryChance = 0.22): boolean {
+  if (!esTerrenoValidoArbusto(x, y)) return false;
+  NATAL_BUSHES.push({ x, y, seed: rand(), berry: rand() < berryChance });
+  return true;
+}
+
+/**
+ * Grupo compacto de matorrales: muestreo elíptico sembrado, sin retícula.
+ * Sólo se usan anclajes como "bioma"; cada arbusto cae donde el terreno lo permite.
+ */
+function poblarGrupoDeArbustos(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  count: number,
+  rand: () => number
+) {
+  let placed = 0;
+  let tries = 0;
+  while (placed < count && tries < count * 12) {
+    tries++;
+    const angle = rand() * Math.PI * 2;
+    const radius = Math.sqrt(rand());
+    const x = cx + Math.cos(angle) * rx * radius;
+    const y = cy + Math.sin(angle) * ry * radius;
+    if (pushBush(x, y, rand)) placed++;
+  }
+}
+
+/**
+ * Reparto de la referencia:
+ * 1. Orla de matorrales que abraza todo el borde césped/arena.
+ * 2. Grupos junto a caminos, huerta, cabaña y arboleda.
+ * 3. Matas pequeñas flanqueando los senderos empedrados.
+ */
 function poblarArbustos() {
-  const radioDispersion = 45; // Área máxima alrededor del centro
+  const rand = natalBushRand(0x5eadc0de);
 
-  puntosEstrategicos.forEach((centro) => {
-    // Elegir aleatoriamente entre 12 y 25 arbustos por grupo
-    const cantidad = Math.floor(Math.random() * 14) + 12; 
+  // --- 1. Orla perimetral: sigue el contorno orgánico de la pradera ---
+  let cxs = 0;
+  let cys = 0;
+  for (const [mx, my] of NATAL_MEADOW_RING) {
+    cxs += mx;
+    cys += my;
+  }
+  const centerX = cxs / NATAL_MEADOW_RING.length;
+  const centerY = cys / NATAL_MEADOW_RING.length;
 
-    for (let i = 0; i < cantidad; i++) {
-      // Calcular un desplazamiento (offset) aleatorio en círculo
-      const angulo = Math.random() * Math.PI * 2;
-      const distancia = Math.random() * radioDispersion;
+  for (let i = 0; i < NATAL_MEADOW_RING.length; i += 1) {
+    const [mx, my] = NATAL_MEADOW_RING[i];
+    // Zona de playa sur: menos matorrales para dejar respirar las palmeras.
+    const density = my > 1180 ? 0.46 : 0.74;
+    if (rand() > density) continue;
+    const dirX = centerX - mx;
+    const dirY = centerY - my;
+    const len = Math.hypot(dirX, dirY) || 1;
+    const inset = 8 + rand() * 26;
+    const jitterX = (rand() - 0.5) * 10;
+    const jitterY = (rand() - 0.5) * 8;
+    pushBush(
+      mx + (dirX / len) * inset + jitterX,
+      my + (dirY / len) * inset + jitterY,
+      rand,
+      0.26
+    );
+    // Segunda fila interior ocasional: orla tupida como en la referencia.
+    if (rand() > 0.52) {
+      const inner = inset + 18 + rand() * 22;
+      pushBush(
+        mx + (dirX / len) * inner + jitterX * 1.4,
+        my + (dirY / len) * inner + jitterY * 1.4,
+        rand,
+        0.2
+      );
+    }
+  }
 
-      const posX = centro.x + Math.cos(angulo) * distancia;
-      const posY = centro.y + Math.sin(angulo) * distancia;
+  // --- 2. Grupos interiores (anclajes de vegetación, no retícula) ---
+  const grupos: [number, number, number, number, number][] = [
+    [700, 1072, 44, 28, 7], // jardín de la cabaña
+    [772, 1006, 34, 24, 5], // este de la cabaña
+    [568, 880, 36, 24, 4], // cabecera del tejado rojo
+    [1046, 1122, 46, 26, 6], // huerta central, lado sur
+    [1310, 1112, 42, 24, 5], // huerta central, lado este
+    [1136, 850, 30, 20, 4], // crucero norte
+    [1378, 856, 44, 26, 6], // borde del sendero de la arboleda
+    [1556, 786, 38, 22, 5], // entrada de la arboleda
+    [1768, 1000, 48, 34, 7], // borde este
+    [1842, 1086, 36, 26, 5], // punta sureste de la pradera
+    [924, 900, 40, 24, 5], // claro noreste
+    [1080, 768, 30, 18, 3], // puerto oeste
+    [1298, 762, 30, 18, 3], // puerto este
+    [948, 1150, 44, 26, 5], // playa suroeste
+    [1480, 1146, 46, 26, 5], // playa sureste
+    [1560, 764, 48, 30, 6], // sotobosque de la arboleda
+    [1688, 768, 44, 26, 5], // sotobosque de la arboleda
+    [1788, 806, 50, 30, 6], // sotobosque de la arboleda
+    [1862, 910, 38, 40, 5], // linde este del bosque
+    [1596, 856, 38, 22, 4], // claro junto al sendero
+  ];
+  for (const [cx, cy, rx, ry, count] of grupos) {
+    poblarGrupoDeArbustos(cx, cy, rx, ry, count, rand);
+  }
 
-      if (esTerrenoValido(posX, posY)) {
-        NATAL_BUSHES.push({
-          x: posX,
-          y: posY,
-          seed: Math.random(),
-          berry: Math.random() > 0.7,
+  // --- 3. Matas pequeñas flanqueando los senderos empedrados ---
+  for (const route of ISLA_NATAL_PATH_ROUTES) {
+    for (let i = 0; i < route.points.length - 1; i++) {
+      const [ax, ay] = route.points[i];
+      const [bx, by] = route.points[i + 1];
+      const segLen = Math.hypot(bx - ax, by - ay);
+      if (segLen < 12) continue;
+      const step = 38 + rand() * 26;
+      const nx = -(by - ay) / segLen;
+      const ny = (bx - ax) / segLen;
+      for (let t = 12 + rand() * step; t < segLen - 8; t += step) {
+        if (rand() > 0.55) continue;
+        const px = ax + ((bx - ax) * t) / segLen;
+        const py = ay + ((by - ay) * t) / segLen;
+        const side = rand() > 0.5 ? 1 : -1;
+        const offset = route.width * 0.5 + 9 + rand() * 12;
+        const bx2 = px + nx * offset * side;
+        const by2 = py + ny * offset * side;
+        if (!esTerrenoValidoArbusto(bx2, by2)) continue;
+        // Las matas de sendero van a la lista pequeña con altura variable:
+        // grupos bajos pegados al borde y algún arbusto mediano más atrás.
+        NATAL_PATH_SIDE_BUSHES.push({
+          x: bx2,
+          y: by2,
+          seed: rand(),
+          berry: rand() < 0.18,
+          scale: 0.62 + rand() * 0.3,
         });
+        if (rand() > 0.64) {
+          const deepOffset = offset + 12 + rand() * 14;
+          const bx3 = px + nx * deepOffset * side;
+          const by3 = py + ny * deepOffset * side;
+          if (esTerrenoValidoArbusto(bx3, by3)) {
+            NATAL_PATH_SIDE_BUSHES.push({
+              x: bx3,
+              y: by3,
+              seed: rand(),
+              berry: rand() < 0.16,
+              scale: 0.72 + rand() * 0.34,
+            });
+          }
+        }
       }
     }
-  });
+  }
 }
 
 poblarArbustos();
@@ -2098,6 +2209,87 @@ function paintGroundHalo(
 
 /* ------------------------------ ARENA ----------------------------- */
 
+/**
+ * Rizaduras de viento sobre la arena: crestas largas y sinuosas con sombra
+ * cálida al sur, micro-rizos entre ellas y vetas tenues de arrastre. Se pinta
+ * por píxeles para conservar el grano del pixel art sin filtros.
+ */
+function paintWindRipples(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  seed: number
+): void {
+  // 1. Crestas principales interrumpidas: ninguna línea recorre la playa entera.
+  // La separación entre crestas varía para que el viento no forme un rayado fijo.
+  for (let band = 0, by = y + 3; by < y + h - 2; band += 1) {
+    const phase = hash2(band * 13 + seed, seed + 7) * Math.PI * 2;
+    const amp = 1.5 + hash2(band * 5 + 1, seed + 11) * 2.2;
+    const drift = (hash2(band + 9, seed + 3) - 0.5) * 9;
+    for (let px = x + 2; px < x + w - 2; px += 3) {
+      // Zonas donde el viento borró la rizadura.
+      const zone = hash2(px * 0.008 + seed, by * 0.021);
+      if (zone < 0.12) continue;
+      const wave =
+        Math.sin(px * 0.017 + phase) * amp +
+        Math.sin(px * 0.0053 + phase * 0.6) * amp * 1.9;
+      const ry = Math.round(by + wave + drift);
+      const th = hash2(px * 3 + seed, by - seed);
+      if (th < 0.1) continue;
+      // Talud de sombra al sur de la cresta.
+      ctx.fillStyle = th > 0.55 ? 'rgba(139, 104, 60, 0.2)' : 'rgba(158, 122, 74, 0.15)';
+      ctx.fillRect(px, ry + 1, 3, 1);
+      // Filo iluminado por el sol bajo.
+      ctx.fillStyle = th > 0.7 ? 'rgba(255, 246, 214, 0.3)' : 'rgba(250, 232, 190, 0.2)';
+      ctx.fillRect(px, ry, 3, 1);
+      // Sombra fina al pie del talud.
+      if (th > 0.62) {
+        ctx.fillStyle = 'rgba(108, 78, 44, 0.12)';
+        ctx.fillRect(px + 1, ry + 2, 2, 1);
+      }
+    }
+    by += 9 + Math.floor(hash2(band * 11 + seed, seed + 2) * 7);
+  }
+
+  // 2. Micro-rizos discontinuos entre las crestas, como la arena fina del desierto.
+  for (let by = y + 9; by < y + h - 2; by += 17) {
+    const phase = hash2(by + seed, seed) * Math.PI * 2;
+    for (let px = x + 6; px < x + w - 6; px += 4) {
+      const z = hash2(px * 0.012 + 3, by * 0.03 - seed);
+      if (z < 0.55) continue;
+      const ry = Math.round(by + Math.sin(px * 0.021 + phase) * 2);
+      ctx.fillStyle = z > 0.8 ? 'rgba(255, 240, 204, 0.13)' : 'rgba(148, 112, 66, 0.09)';
+      ctx.fillRect(px, ry, 2, 1);
+    }
+  }
+
+  // 3. Vetas de viento largas y muy tenues, con inclinación variable.
+  for (let i = 0; i < 30; i += 1) {
+    const sx = x + Math.floor(hash2(seed + i * 17, y + i) * w);
+    const sy = y + Math.floor(hash2(x + i * 5, seed + i * 3) * h);
+    const len = 14 + Math.floor(hash2(i + 3, seed + 5) * 30);
+    const slope = -0.2 + hash2(seed + i, i + 7) * 0.28;
+    for (let s = 0; s < len; s += 2) {
+      ctx.fillStyle = 'rgba(255, 246, 216, 0.10)';
+      ctx.fillRect(sx + s, sy + Math.round(s * slope), 1, 1);
+    }
+  }
+
+  // 4. Algún rizo en media luna aislado para romper la lectura de franjas.
+  for (let i = 0; i < 14; i += 1) {
+    const mx = x + 16 + Math.floor(hash2(seed + i * 23, y + i * 5) * (w - 32));
+    const my = y + 16 + Math.floor(hash2(x + i * 7, seed + i * 11) * (h - 32));
+    ctx.fillStyle = 'rgba(150, 114, 68, 0.14)';
+    ctx.fillRect(mx - 1, my + 1, 7, 1);
+    ctx.fillStyle = 'rgba(255, 242, 206, 0.20)';
+    ctx.fillRect(mx, my, 5, 1);
+    ctx.fillRect(mx - 1, my + 1, 1, 1);
+    ctx.fillRect(mx + 5, my + 1, 1, 1);
+  }
+}
+
 function paintSandTexture(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -2194,10 +2386,13 @@ function paintSandTexture(
         ctx.fillRect(px, py, 2, 1);
       } else if (th < 0.06) {
         ctx.fillStyle = 'rgba(122, 88, 48, 0.32)';
-  ctx.fillRect(px, py, 2, 1);
+        ctx.fillRect(px, py, 2, 1);
       }
     }
   }
+
+  // 5. Dunas y rizaduras de viento sobre las playas y caletas.
+  paintWindRipples(ctx, x, y, w, h, seed + 3);
 }
 
 /**
@@ -2259,6 +2454,108 @@ function paintGrassTexture(
     }
   }
 
+  // 4. Grano fino de hoja: punteado denso que da cuerpo al tapiz sin ruido plano.
+  for (let py = y + 2; py < y + h - 2; py += 5) {
+    for (let px = x + 2; px < x + w - 2; px += 5) {
+      const th = hash2(px * 0.53 + seed, py * 0.47 - seed);
+      if (th < 0.35) continue;
+      ctx.fillStyle =
+        th > 0.82
+          ? 'rgba(148, 224, 104, 0.26)'
+          : th > 0.55
+            ? 'rgba(54, 140, 52, 0.32)'
+            : 'rgba(14, 62, 26, 0.28)';
+      const gx = px + Math.floor(hash2(py, px) * 4);
+      ctx.fillRect(gx, py, 1, 1);
+    }
+  }
+
+  // 5. Matas de 4 a 6 briznas con sombra de raíz y puntas encendidas por el sol.
+  for (let py = y + 4; py < y + h - 4; py += 20) {
+    for (let px = x + 4; px < x + w - 4; px += 22) {
+      const th = hash2(px * 0.29 + 7, py * 0.33 - 11);
+      if (th < 0.22) continue;
+      const bx = px + Math.floor(hash2(py, px) * 12);
+      const by = py + Math.floor(hash2(px + 3, py + 5) * 10);
+      const blades = 4 + Math.floor(th * 3);
+      ctx.fillStyle = 'rgba(8, 30, 14, 0.38)';
+      ctx.fillRect(bx - 3, by + 1, 8, 1);
+      ctx.fillStyle = 'rgba(6, 24, 12, 0.22)';
+      ctx.fillRect(bx - 2, by + 2, 6, 1);
+      for (let b = 0; b < blades; b += 1) {
+        const t = hash2(bx + b * 7, by - b * 3);
+        const lean = b === 0 ? -1 : b === blades - 1 ? 1 : 0;
+        const bh = 4 + Math.floor(t * 4);
+        const sx = bx + lean;
+        ctx.fillStyle = t > 0.82 ? '#2f8a33' : t > 0.48 ? '#256f2b' : '#1a4f22';
+        ctx.fillRect(sx, by - bh, 1, bh);
+        ctx.fillStyle = t > 0.7 ? '#8fe35f' : '#5cc247';
+        ctx.fillRect(sx, by - bh, 1, 1);
+        if (t > 0.38) {
+          ctx.fillStyle = t > 0.66 ? 'rgba(110, 196, 86, 0.9)' : 'rgba(52, 138, 58, 0.85)';
+          ctx.fillRect(sx + (b % 2 === 0 ? 1 : -1), by - Math.max(1, bh - 2), 1, 2);
+        }
+      }
+      // Flor silvestre diminuta en algunas matas, siempre bajo las flores grandes del claro.
+      if (th > 0.94) {
+        ctx.fillStyle = th > 0.97 ? '#fef3c7' : '#f9a8d4';
+        ctx.fillRect(bx, by - 7, 1, 1);
+        ctx.fillStyle = '#2b6b2c';
+        ctx.fillRect(bx - 1, by - 6, 3, 1);
+      }
+    }
+  }
+
+  // 5b. Manto de briznas cortas: la densidad de una pradera segada a mano.
+  for (let py = y + 3; py < y + h - 3; py += 8) {
+    for (let px = x + 3; px < x + w - 3; px += 8) {
+      const t = hash2(px * 0.71 + 31, py * 0.63 - 17);
+      if (t < 0.44) continue;
+      const bx = px + Math.floor(hash2(py + 1, px) * 5);
+      const by = py + Math.floor(hash2(px + 7, py) * 5);
+      const bh = 2 + Math.floor(t * 3);
+      ctx.fillStyle = t > 0.72 ? 'rgba(34, 110, 40, 0.66)' : 'rgba(16, 76, 30, 0.6)';
+      ctx.fillRect(bx, by - bh, 1, bh);
+      ctx.fillStyle = t > 0.62 ? 'rgba(110, 198, 80, 0.6)' : 'rgba(62, 148, 58, 0.55)';
+      ctx.fillRect(bx, by - bh, 1, 1);
+      if (t > 0.86) {
+        ctx.fillStyle = 'rgba(160, 226, 112, 0.38)';
+        ctx.fillRect(bx + (t > 0.93 ? 1 : -1), by - bh + 1, 1, 1);
+      }
+    }
+  }
+
+  // 6. Brillos peinados: trazos cortos que sugieren la inclinación uniforme de la hoja.
+  for (let py = y + 10; py < y + h - 10; py += 38) {
+    for (let px = x + 10; px < x + w - 10; px += 44) {
+      const th = hash2(px * 0.11 + seed, py * 0.19);
+      if (th < 0.42) continue;
+      const sx = px + Math.floor(hash2(py, px) * 26);
+      const sy = py + Math.floor(hash2(px, py + 2) * 18);
+      const len = 3 + Math.floor(th * 4);
+      ctx.fillStyle = 'rgba(178, 240, 120, 0.18)';
+      ctx.fillRect(sx, sy, len, 1);
+      ctx.fillStyle = 'rgba(10, 40, 16, 0.16)';
+      ctx.fillRect(sx + 1, sy + 1, len - 1, 1);
+    }
+  }
+
+  // 7. Matas secas y oliva muy espaciadas: variación natural sin romper la pradera.
+  for (let py = y + 18; py < y + h; py += 96) {
+    for (let px = x + 16; px < x + w; px += 120) {
+      const th = hash2(px * 0.8 + 3, py * 0.7);
+      if (th < 0.5) continue;
+      const sx = px + Math.floor(hash2(py, px) * 40);
+      const sy = py + Math.floor(hash2(px + 1, py) * 20);
+      ctx.fillStyle = 'rgba(24, 54, 20, 0.4)';
+      ctx.fillRect(sx - 1, sy + 1, 5, 1);
+      for (let b = 0; b < 3; b += 1) {
+        const t = hash2(sx + b * 5, sy);
+        ctx.fillStyle = t > 0.5 ? '#9a9a44' : '#7d8c3c';
+        ctx.fillRect(sx + b, sy - 2 - Math.floor(t * 3), 1, 3 + Math.floor(t * 2));
+      }
+    }
+  }
 }
 
 /* ------------------------------ CÉSPED ---------------------------- */
@@ -2366,6 +2663,31 @@ function paintUnifiedIslandMeadow(ctx: CanvasRenderingContext2D): void {
 
   // 2. Renderizado del manto de césped y detalles
   paintGrassTexture(octx, minX, minY, w, h, 42);
+
+  // Manchas amplias de sol, sombra de nubes y calvas cálidas: rompen el verde plano
+  // y dan la variación tonal de la referencia.
+  const meadowPatches: [number, number, number, number, string, number][] = [
+    [1210, 906, 236, 118, '120, 144, 66', 0.085],
+    [846, 1016, 172, 92, '96, 126, 52', 0.075],
+    [1526, 1044, 188, 98, '112, 134, 58', 0.08],
+    [978, 788, 152, 70, '24, 72, 34', 0.09],
+    [1408, 922, 162, 88, '26, 70, 36', 0.075],
+    [706, 818, 132, 78, '20, 60, 30', 0.08],
+    [1758, 956, 138, 104, '30, 76, 40', 0.09],
+    [626, 1124, 138, 68, '98, 128, 54', 0.07],
+    [1292, 1182, 150, 70, '106, 132, 54', 0.07],
+    [1102, 986, 96, 54, '118, 90, 52', 0.07],
+    [720, 1072, 72, 44, '122, 94, 58', 0.09],
+  ];
+  for (const [px, py, prx, pry, rgb, alpha] of meadowPatches) {
+    paintGroundHalo(octx, px, py, prx, pry, rgb, alpha);
+  }
+
+  // Sombra de dosel sobre la pradera: asienta el bosque y da profundidad al suelo.
+  for (const tree of ISLA_NATAL_TREES) {
+    const s = tree.scale ?? 1;
+    paintGroundHalo(octx, tree.x + 14 * s, tree.y + 7, 50 * s, 23 * s, '10, 34, 18', 0.11);
+  }
 
   for (let py = minY + 12; py < maxY - 12; py += 24) {
     for (let px = minX + 12; px < maxX - 12; px += 28) {
@@ -3381,6 +3703,38 @@ function paintOrganicRockHeadland(ctx: CanvasRenderingContext2D): void {
   paintRockTexture(ctx, 300, 300, 560, 480, 41);
   paintRockTexture(ctx, 560, 1310, 56, 42, 73);
   paintRockTexture(ctx, 1736, 1310, 56, 42, 79);
+  // Cayos rocosos nuevos de la costa ampliada.
+  paintRockTexture(ctx, 220, 660, 84, 68, 97);
+  paintRockTexture(ctx, 2058, 900, 84, 76, 101);
+  paintRockTexture(ctx, 1188, 1576, 92, 70, 103);
+
+  // Musgo y líquenes de altura: manchas verdes que rompen la piedra desnuda.
+  const mossZones: [number, number, number, number, number][] = [
+    [520, 470, 88, 40, 0.14],
+    [694, 502, 74, 32, 0.12],
+    [640, 642, 96, 38, 0.13],
+    [474, 612, 58, 28, 0.11],
+    [762, 624, 48, 24, 0.1],
+    [580, 736, 66, 26, 0.1],
+  ];
+  for (const [mx, my, mrx, mry, alpha] of mossZones) {
+    paintGroundHalo(ctx, mx, my, mrx, mry, '76, 104, 52', alpha);
+  }
+
+  // Matujas rastreras asomando entre las grietas de la cantera.
+  for (let i = 0; i < 64; i++) {
+    const tx = 420 + hash2(i * 37 + 5, 911) * 400;
+    const ty = 392 + hash2(i * 53 - 9, 277) * 356;
+    if (!pointInPolygonRing(tx, ty, NATAL_ROCK_PLATEAU_RING)) continue;
+    if (hash2(i * 11 + 3, i * 19 + 7) < 0.42) continue;
+    ctx.fillStyle = 'rgba(18, 38, 16, 0.38)';
+    ctx.fillRect(tx - 1, ty + 1, 4, 1);
+    ctx.fillStyle = i % 3 === 0 ? '#6aa044' : '#4a7c34';
+    ctx.fillRect(tx, ty - 2, 1, 3);
+    ctx.fillRect(tx + 2, ty - 1, 1, 2);
+    ctx.fillStyle = '#8cbf58';
+    ctx.fillRect(tx + 1, ty - 2, 1, 1);
+  }
   ctx.restore();
 
   // 2. Terraza alta curva del Mirador del Alto de las Rocas
@@ -3424,19 +3778,42 @@ function paintCoastBand(ctx: CanvasRenderingContext2D, field: NatalCoastField): 
       const d = sampleDistancePx(field, wx, wy);
 
       if (d <= 0.05) {
-        // Tierra firme: pintamos la orla húmeda de marea y el filo vivo de espuma/roca mojada
+        // Tierra firme: orla húmeda de marea con cúspides de playa y filo vivo de espuma.
         const inner = sampleInnerDistancePx(field, wx, wy);
-        if (inner < 17) {
-          const surface = sampleSurfaceAt(field, wx, wy);
-          ctx.fillStyle = wetRimColor(surface, 1 - inner / 17);
+        const surface = sampleSurfaceAt(field, wx, wy);
+        const cusp =
+          Math.sin(wx * 0.019 + Math.sin(wy * 0.014) * 2.4) * 0.5 +
+          Math.sin(wy * 0.031 - wx * 0.011 + 1.3) * 0.25;
+        const wetLimit = surface === 'rock' ? 13 : 18 + cusp * 10;
+        if (inner < wetLimit) {
+          ctx.fillStyle = wetRimColor(surface, 1 - inner / wetLimit);
           ctx.fillRect(px, py, step, step);
           const th = hash2(px + 29, py - 61);
+          // Lengua de arena seca que se aclara hacia el interior de la playa.
+          if (surface === 'sand' && inner > wetLimit - 4 && inner < wetLimit - 1.2) {
+            if (th > 0.4) {
+              ctx.fillStyle = `rgba(122, 86, 48, ${(0.1 + th * 0.11).toFixed(3)})`;
+              ctx.fillRect(px, py, step, 1);
+            }
+          }
+          // Restos de marea: algas y conchas diminutas, nunca una línea uniforme.
+          if (surface === 'sand' && inner > 5 && inner < wetLimit - 4 && th > 0.978) {
+            ctx.fillStyle = th > 0.99 ? 'rgba(74, 92, 62, 0.42)' : 'rgba(238, 220, 184, 0.4)';
+            ctx.fillRect(px, py, 1 + Math.floor(th * 3), 1);
+          }
           if (inner < 3.2 && th > 0.46) {
             ctx.fillStyle =
               surface === 'rock'
                 ? 'rgba(210, 238, 236, 0.34)'
                 : 'rgba(255, 248, 224, 0.36)';
             ctx.fillRect(px, py, step, 1);
+          }
+        } else if (surface === 'sand' && inner < wetLimit + 9) {
+          // Solape cálido entre arena mojada y arena seca.
+          const th = hash2(px - 13, py + 47);
+          if (th > 0.72) {
+            ctx.fillStyle = 'rgba(240, 214, 166, 0.1)';
+            ctx.fillRect(px, py, step, step);
           }
         }
         continue;
@@ -3469,6 +3846,20 @@ function paintCoastBand(ctx: CanvasRenderingContext2D, field: NatalCoastField): 
         const sandGlow = (1 - band / 28) * 0.2;
         ctx.fillStyle = `rgba(222, 190, 134, ${sandGlow.toFixed(3)})`;
         ctx.fillRect(px, py, step, step);
+      }
+
+      // Crestas de arena sumergidas: bandas paralelas irregulares frente a las playas abiertas.
+      if (surface === 'sand' && band > 9 && band < 44) {
+        const ridge =
+          Math.sin(band * 0.52 + wx * 0.013 + Math.sin(wy * 0.017) * 1.8) +
+          Math.sin(band * 0.21 - wy * 0.009);
+        if (ridge > 1.15) {
+          ctx.fillStyle = 'rgba(178, 240, 226, 0.075)';
+          ctx.fillRect(px, py, step, step);
+        } else if (ridge < -1.5) {
+          ctx.fillStyle = 'rgba(10, 74, 86, 0.06)';
+          ctx.fillRect(px, py, step, step);
+        }
       }
 
       // Detalle submarino: destellos, praderas de posidonia y arrecifes someros
@@ -3798,12 +4189,12 @@ function drawTuft(ctx: CanvasRenderingContext2D, x: number, y: number, seed: num
     ctx.fillStyle = seed > 0.5 ? '#5fae4e' : '#4f9a45';
     ctx.fillRect(x - 2, y - h, 1, h);
     ctx.fillRect(x + 2, y - h + 1, 1, h - 1);
-    ctx.fillStyle = seed > 0.5 ? '#8ddb74' : '#79c96a';
+    ctx.fillStyle = seed > 0.5 ? '#7fcb66' : '#6db95a';
     ctx.fillRect(x - 1 + sway, y - h, 1, h - 1);
     ctx.fillRect(x + 1 + sway, y - h - 1, 1, h);
     ctx.fillRect(x + sway, y - h + 2, 1, h - 3);
-    if (seed > 0.62) {
-      ctx.fillStyle = '#b7e88f';
+    if (seed > 0.78) {
+      ctx.fillStyle = '#a5dc7f';
       ctx.fillRect(x + 1 + sway, y - h - 1, 1, 1);
     }
   } else if (kind === 1) {
@@ -3831,7 +4222,7 @@ function drawFlower(ctx: CanvasRenderingContext2D, x: number, y: number, seed: n
   ctx.fillStyle = '#3f8a41';
   ctx.fillRect(x, y - 4, 1, 4);
   ctx.fillRect(x + 1, y - 2, 2, 1);
-  const petal = seed > 0.8 ? '#f9a8d4' : seed > 0.55 ? '#fde68a' : seed > 0.3 ? '#f8fafc' : '#c4b5fd';
+  const petal = seed > 0.8 ? '#f9a8d4' : seed > 0.55 ? '#fde68a' : seed > 0.42 ? '#f8fafc' : '#c4b5fd';
   ctx.fillStyle = petal;
   ctx.fillRect(x - 1, y - 6, 3, 1);
   ctx.fillRect(x - 1, y - 5, 1, 3);
@@ -3942,18 +4333,45 @@ export function drawEntityDynamicShadow(
   ctx.restore();
 }
 
+let natalHuertaSprite: HTMLImageElement | null = null;
+
+function ensureNatalHuertaSprite(): HTMLImageElement | null {
+  if (typeof Image === 'undefined') return null;
+  if (!natalHuertaSprite) {
+    natalHuertaSprite = new Image();
+    natalHuertaSprite.decoding = 'async';
+    natalHuertaSprite.src = '/assets/pixelverse/natal-huerta.png';
+  }
+  return natalHuertaSprite.complete && natalHuertaSprite.naturalWidth > 0
+    ? natalHuertaSprite
+    : null;
+}
+
 /**
- * Dibuja la Huerta de Cultivo en HUERTA_RECT (1068, 940, 216, 98):
- * Surcos de tierra fértil, hortalizas (calabazas, tomates con tutores, maíz, coles),
- * cajones de madera, barril de agua y postes de cerco.
- * Para cada hortaliza y elemento, proyecta sombras elípticas semitransparentes (rgba(0,0,0,0.25))
- * calculadas dinámicamente según la posición Y.
+ * Dibuja la Huerta Central sobre el claro del anillo de caminos.
+ * Usa el sprite pixel-art de la huerta cerrada; si aún no cargó, mantiene el
+ * respaldo procedural de surcos y hortalizas dentro de HUERTA_RECT.
  */
 function drawHuertaGarden(
   ctx: CanvasRenderingContext2D,
   elapsed: number,
   reducedMotion: boolean
 ): void {
+  const sprite = ensureNatalHuertaSprite();
+  if (sprite) {
+    const { x, y, w, h } = HUERTA_SPRITE_RECT;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    // Asiento suave en el césped para que el cerco no quede flotando.
+    ctx.fillStyle = 'rgba(12, 30, 14, 0.16)';
+    ctx.beginPath();
+    ctx.ellipse(x + w * 0.5, y + h - 10, w * 0.44, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.drawImage(sprite, x, y, w, h);
+    ctx.restore();
+    return;
+  }
+
   const { x, y, w, h } = HUERTA_RECT;
 
   // 1. Parche de tierra fértil de la huerta (surcos)
@@ -5248,6 +5666,1014 @@ function drawFallenLog(
 /* CONSTRUCCIONES                                                     */
 /* ------------------------------------------------------------------ */
 
+/* Componentes arquitectónicos reutilizables: cubiertas de teja, paja y
+ * tejamanil, hastiales entramados, ventanas y puertas con profundidad,
+ * cimientos y utilería de fachada. Se combinan con distinta paleta para
+ * que cada casa de Isla Natal tenga su propia personalidad. */
+
+interface NatalRoofPalette {
+  dark: string;
+  mid: string;
+  light: string;
+  hi: string;
+  ridge: string;
+  ridgeHi: string;
+  shadow: string;
+}
+
+const NATAL_CLAY_ROOF: NatalRoofPalette = {
+  dark: '#7c331c',
+  mid: '#a84b2b',
+  light: '#c9633a',
+  hi: '#e58a54',
+  ridge: '#5d2a17',
+  ridgeHi: '#a95c35',
+  shadow: 'rgba(58, 24, 12, 0.55)',
+};
+
+const NATAL_THATCH_ROOF: NatalRoofPalette = {
+  dark: '#8a5c26',
+  mid: '#b3803c',
+  light: '#cf9c50',
+  hi: '#e9c071',
+  ridge: '#6d451d',
+  ridgeHi: '#a9783a',
+  shadow: 'rgba(58, 36, 12, 0.55)',
+};
+
+const NATAL_SHINGLE_ROOF: NatalRoofPalette = {
+  dark: '#1b3a2d',
+  mid: '#2b5542',
+  light: '#3d7058',
+  hi: '#6fa083',
+  ridge: '#122a20',
+  ridgeHi: '#3d6f58',
+  shadow: 'rgba(6, 22, 16, 0.6)',
+};
+
+/** Sombra de contacto y proyección de la casa sobre la pradera. */
+function drawHouseGroundShadow(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  baseY: number,
+  w: number
+): void {
+  ctx.fillStyle = 'rgba(7, 14, 9, 0.34)';
+  ctx.beginPath();
+  ctx.ellipse(x + w * 0.52 + 6, baseY + 4, w * 0.57 + 14, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Sombra proyectada hacia el sureste por el sol de la tarde.
+  ctx.fillStyle = 'rgba(10, 20, 12, 0.18)';
+  ctx.beginPath();
+  ctx.moveTo(x + w - 6, baseY - 4);
+  ctx.lineTo(x + w + 26, baseY + 5);
+  ctx.lineTo(x + w + 18, baseY + 14);
+  ctx.lineTo(x + w * 0.55, baseY + 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = 'rgba(3, 8, 5, 0.66)';
+  ctx.fillRect(x - 4, baseY - 1, w + 10, 3);
+}
+
+/** Bajoalero con cabios vistos, listones y sombra profunda. */
+function drawRoofEaveDepth(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  eaveY: number,
+  w: number,
+  beam: string,
+  beamHi: string,
+  rafterStep = 13
+): void {
+  ctx.fillStyle = 'rgba(15, 9, 5, 0.72)';
+  ctx.fillRect(x, eaveY - 1, w, 4);
+  for (let rx = x + 3; rx < x + w - 4; rx += rafterStep) {
+    ctx.fillStyle = 'rgba(24, 14, 8, 0.9)';
+    ctx.fillRect(rx, eaveY, 3, 5);
+    ctx.fillStyle = beam;
+    ctx.fillRect(rx, eaveY, 3, 3);
+    ctx.fillStyle = beamHi;
+    ctx.fillRect(rx, eaveY, 2, 1);
+  }
+  ctx.fillStyle = beam;
+  ctx.fillRect(x, eaveY + 2, w, 2);
+  ctx.fillStyle = beamHi;
+  ctx.fillRect(x, eaveY + 2, w, 1);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.26)';
+  ctx.fillRect(x, eaveY + 4, w, 2);
+}
+
+/** Tejado de teja árabe: hileras escalonadas, canalones de cumbrera y musgo. */
+function drawClayTileRoof(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  seed: number
+): void {
+  const pal = NATAL_CLAY_ROOF;
+  const rows = Math.max(4, Math.ceil(h / 4));
+  // Silueta con alero acampanado.
+  ctx.fillStyle = '#432014';
+  ctx.fillRect(x - 2, y - 1, w + 4, h + 6);
+  for (let r = 0; r <= rows; r += 1) {
+    const ry = y + r * 4;
+    const flare = Math.round((r / rows) * 4);
+    const rx = x - flare;
+    const rw = w + flare * 2;
+    ctx.fillStyle = pal.dark;
+    ctx.fillRect(rx, ry, rw, 5);
+    const rowShift = (r % 2) * 2;
+    for (let tx = rx - 2 + rowShift, col = 0; tx < rx + rw - 2; tx += 5, col += 1) {
+      const th = hash2(tx + r * 5 + seed * 31, ry + col);
+      const tone = th > 0.74 ? pal.hi : th > 0.5 ? pal.light : th > 0.24 ? pal.mid : pal.dark;
+      ctx.fillStyle = tone;
+      ctx.fillRect(tx, ry, 4, 4);
+      // Curva inferior de cada teja.
+      ctx.fillRect(tx, ry + 3, 4, 1);
+      ctx.fillStyle = r < 3 ? 'rgba(255, 214, 158, 0.4)' : 'rgba(255, 188, 132, 0.22)';
+      ctx.fillRect(tx, ry, 3, 1);
+      // Brillo longitudinal que sugiere el caño de la teja árabe.
+      ctx.fillStyle = 'rgba(255, 226, 180, 0.26)';
+      ctx.fillRect(tx + 1, ry + 1, 1, 2);
+      ctx.fillStyle = pal.shadow;
+      ctx.fillRect(tx, ry + 4, 4, 1);
+      if (th > 0.86) {
+        ctx.fillStyle = 'rgba(255, 236, 190, 0.35)';
+        ctx.fillRect(tx + 1, ry + 1, 1, 1);
+      }
+    }
+  }
+  // Alero: remate redondeado que sobresale del plano.
+  const bottomY = y + rows * 4;
+  for (let tx = x - 3; tx < x + w + 3; tx += 5) {
+    ctx.fillStyle = '#4c2315';
+    ctx.fillRect(tx, bottomY, 5, 4);
+    ctx.fillStyle = (Math.floor(tx / 5) % 2 === 0 ? pal.mid : pal.light);
+    ctx.fillRect(tx, bottomY, 4, 3);
+    ctx.fillStyle = pal.hi;
+    ctx.fillRect(tx, bottomY, 3, 1);
+    ctx.fillStyle = 'rgba(40, 18, 10, 0.6)';
+    ctx.fillRect(tx + 1, bottomY + 3, 3, 1);
+  }
+  // Cumbrera de tejas curvas con remates de madera.
+  ctx.fillStyle = pal.ridge;
+  ctx.fillRect(x - 3, y - 5, w + 6, 6);
+  ctx.fillStyle = pal.ridgeHi;
+  ctx.fillRect(x - 2, y - 4, w + 4, 2);
+  for (let rx = x - 1; rx < x + w; rx += 6) {
+    ctx.fillStyle = pal.ridge;
+    ctx.fillRect(rx, y - 5, 5, 3);
+    ctx.fillStyle = pal.hi;
+    ctx.fillRect(rx + 1, y - 5, 3, 1);
+  }
+  ctx.fillStyle = '#d8a06c';
+  ctx.fillRect(x - 4, y - 6, 3, 3);
+  ctx.fillRect(x + w + 2, y - 6, 3, 3);
+  // Musgo y liquen del clima húmedo.
+  for (let i = 0; i < 5; i += 1) {
+    const mx = x + 4 + Math.floor(hash2(seed + i * 9, y + i * 4) * (w - 10));
+    const my = y + 4 + Math.floor(hash2(x + i * 3, seed + i * 7) * (h - 8));
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(108, 154, 74, 0.55)' : 'rgba(84, 126, 58, 0.5)';
+    ctx.fillRect(mx, my, 4 + (i % 3) * 2, 2);
+    ctx.fillStyle = 'rgba(158, 198, 110, 0.35)';
+    ctx.fillRect(mx + 1, my, 2, 1);
+  }
+}
+
+/** Festón de paja que cuelga bajo el alero, con hebras de distinta longitud. */
+function drawThatchFringe(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  eaveY: number,
+  w: number,
+  seed: number
+): void {
+  for (let tx = x; tx < x + w; tx += 3) {
+    const th = hash2(tx + 5, eaveY + seed);
+    const drop = 1 + Math.floor(th * 5);
+    ctx.fillStyle = th > 0.62 ? '#a9762f' : th > 0.34 ? '#8a5c22' : '#6f4a1c';
+    ctx.fillRect(tx, eaveY - 2, 2, drop + 2);
+    ctx.fillStyle = th > 0.5 ? '#e2bb6c' : '#bd8f46';
+    ctx.fillRect(tx, eaveY - 2, 2, 1);
+    if (th > 0.7) {
+      ctx.fillStyle = '#5c3d16';
+      ctx.fillRect(tx + 1, eaveY + drop + 1, 1, 2);
+    }
+  }
+}
+
+/** Tejado de paja dorada con haces, alero festoneado y cumbrera atada. */
+function drawThatchRoof(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  seed: number
+): void {
+  const pal = NATAL_THATCH_ROOF;
+  // Sombra proyectada bajo el alero.
+  ctx.fillStyle = 'rgba(34, 22, 9, 0.45)';
+  ctx.fillRect(x - 6, y + h, w + 12, 4);
+  // Silueta irregular del fardo de paja.
+  ctx.fillStyle = '#3f270f';
+  ctx.fillRect(x - 3, y + 1, w + 6, h + 4);
+  ctx.fillRect(x - 1, y - 1, w + 2, h + 3);
+  for (let tx = x - 4; tx < x + w + 4; tx += 3) {
+    const th = hash2(tx * 3, seed + 5);
+    if (th > 0.55) {
+      ctx.fillStyle = th > 0.8 ? '#7a5222' : '#5a3a15';
+      ctx.fillRect(tx, y + h + 1, 2, 1 + Math.floor(th * 3));
+    }
+  }
+  const grade = ctx.createLinearGradient(0, y - 4, 0, y + h + 2);
+  grade.addColorStop(0, '#cfa05a');
+  grade.addColorStop(0.38, '#b8873f');
+  grade.addColorStop(0.74, '#966a2c');
+  grade.addColorStop(1, '#75501c');
+  ctx.fillStyle = grade;
+  ctx.fillRect(x - 2, y, w + 4, h + 2);
+
+  // Manchas amplias de tono: zonas asoleadas y zonas en sombra bajo la cumbrera.
+  for (let i = 0; i < 10; i += 1) {
+    const bx = x + 2 + Math.floor(hash2(seed + i * 7, y + i * 3) * (w - 12));
+    const by = y + 3 + Math.floor(hash2(x + i * 11, seed + i) * (h - 14));
+    const bw = 6 + Math.floor(hash2(i + 2, seed * 3) * 8);
+    const bh = 2 + Math.floor(hash2(seed + i * 2, i + 9) * 3);
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(84, 52, 18, 0.1)' : 'rgba(255, 229, 166, 0.09)';
+    ctx.fillRect(bx, by, bw, bh);
+  }
+
+  // Fajas de paja superpuestas: borde festoneado y sombra de solape.
+  const courseH = 5;
+  for (let cy = y + 1; cy < y + h; cy += courseH) {
+    for (let cx = x - 2; cx < x + w + 2; cx += 2) {
+      const th = hash2(cx * 3 + cy * 7, seed);
+      const wave = Math.round(Math.sin((cx + seed * 7) * 0.19 + cy * 0.6));
+      ctx.fillStyle = 'rgba(58, 36, 12, 0.34)';
+      ctx.fillRect(cx, cy + courseH - 1 + wave, 2, 2);
+      ctx.fillStyle = th > 0.55 ? 'rgba(242, 208, 141, 0.5)' : 'rgba(138, 92, 38, 0.42)';
+      ctx.fillRect(cx, cy + courseH - 1 + wave, 1, 2 + Math.floor(th * 4));
+    }
+  }
+
+  // Fibras finas y largas que recorren la pendiente con quiebres irregulares.
+  for (let i = 0; i < 130; i += 1) {
+    const fx = x + 1 + Math.floor(hash2(seed * 13 + i, y + i) * (w - 2));
+    const fy = y + Math.floor(hash2(x + i, seed + i * 7) * h);
+    const len = 3 + Math.floor(hash2(i + 5, seed + i) * 10);
+    ctx.fillStyle =
+      i % 3 === 0
+        ? 'rgba(255, 234, 176, 0.4)'
+        : i % 3 === 1
+        ? 'rgba(116, 75, 28, 0.32)'
+        : 'rgba(208, 166, 92, 0.3)';
+    ctx.fillRect(fx, fy, 1, Math.min(len, y + h - fy));
+  }
+
+  // Volumen: bordes laterales sombreados y franja superior iluminada.
+  const sideShade = ctx.createLinearGradient(x - 2, 0, x + w + 2, 0);
+  sideShade.addColorStop(0, 'rgba(58, 34, 10, 0.42)');
+  sideShade.addColorStop(0.12, 'rgba(58, 34, 10, 0)');
+  sideShade.addColorStop(0.86, 'rgba(58, 34, 10, 0)');
+  sideShade.addColorStop(1, 'rgba(58, 34, 10, 0.42)');
+  ctx.fillStyle = sideShade;
+  ctx.fillRect(x - 2, y, w + 4, h + 2);
+  const topLight = ctx.createLinearGradient(0, y, 0, y + h * 0.42);
+  topLight.addColorStop(0, 'rgba(255, 240, 190, 0.26)');
+  topLight.addColorStop(1, 'rgba(255, 240, 190, 0)');
+  ctx.fillStyle = topLight;
+  ctx.fillRect(x - 2, y, w + 4, Math.round(h * 0.42));
+  // Sombra de la cumbrera sobre el faldón.
+  const ridgeShade = ctx.createLinearGradient(0, y - 1, 0, y + 7);
+  ridgeShade.addColorStop(0, 'rgba(52, 32, 10, 0.4)');
+  ridgeShade.addColorStop(1, 'rgba(52, 32, 10, 0)');
+  ctx.fillStyle = ridgeShade;
+  ctx.fillRect(x - 2, y - 1, w + 4, 8);
+
+  // Festón del alero: haces que cuelgan sobre el muro.
+  drawThatchFringe(ctx, x - 4, y + h, w + 8, seed);
+  // Flecos laterales para que la silueta no corte en recto.
+  for (let ty = y + 4; ty < y + h; ty += 4) {
+    const lth = hash2(seed + 4, ty);
+    const rth = hash2(seed + 9, ty);
+    for (const side of [0, 1]) {
+      const th = side === 0 ? lth : rth;
+      if (th <= 0.34) continue;
+      ctx.fillStyle = th > 0.7 ? '#c99a4e' : th > 0.5 ? '#a1732f' : '#94662a';
+      const fx = side === 0 ? x - 4 : x + w + 2;
+      ctx.fillRect(fx, ty, 2, 2 + Math.floor(th * 3));
+    }
+  }
+
+  // Cumbrera: rollo de paja atado con cuerdas sobre remates de madera curvada.
+  ctx.fillStyle = '#4d3115';
+  ctx.fillRect(x - 6, y - 8, w + 12, 10);
+  ctx.fillStyle = '#a67a35';
+  ctx.fillRect(x - 5, y - 7, w + 10, 7);
+  ctx.fillStyle = '#c99a4e';
+  ctx.fillRect(x - 4, y - 6, w + 8, 4);
+  ctx.fillStyle = pal.ridgeHi;
+  ctx.fillRect(x - 3, y - 6, w + 6, 2);
+  ctx.fillStyle = '#edc987';
+  ctx.fillRect(x - 3, y - 7, w + 6, 1);
+  ctx.fillStyle = 'rgba(72, 44, 14, 0.45)';
+  ctx.fillRect(x - 4, y - 2, w + 8, 2);
+  for (let rx = x - 4; rx < x + w + 4; rx += 2) {
+    const th = hash2(rx * 5, seed + 2);
+    ctx.fillStyle = th > 0.55 ? 'rgba(240, 206, 146, 0.4)' : 'rgba(120, 80, 28, 0.34)';
+    ctx.fillRect(rx, y - 7, 1, 5);
+  }
+  // Ataduras de cuerda espaciadas de forma irregular.
+  for (let i = 0; i < 3; i += 1) {
+    const rx = x + 12 + Math.floor((i * (w - 20)) / 3 + hash2(seed + i, y) * 6);
+    ctx.fillStyle = 'rgba(96, 66, 30, 0.8)';
+    ctx.fillRect(rx, y - 8, 1, 9);
+    ctx.fillStyle = 'rgba(186, 148, 92, 0.7)';
+    ctx.fillRect(rx + 1, y - 7, 1, 7);
+  }
+  // Mechones sueltos sobre la cumbrera.
+  for (let i = 0; i < 14; i += 1) {
+    const rx = x + Math.floor(hash2(seed + i * 9, y + 4) * w);
+    const th = hash2(i + 2, seed + 8);
+    ctx.fillStyle = th > 0.5 ? 'rgba(246, 214, 148, 0.55)' : 'rgba(122, 82, 30, 0.45)';
+    ctx.fillRect(rx, y - 8 - Math.floor(th * 2), 1, 3 + Math.floor(th * 3));
+  }
+  ctx.fillStyle = '#5c3b1a';
+  ctx.fillRect(x - 8, y - 8, 4, 5);
+  ctx.fillRect(x + w + 4, y - 8, 4, 5);
+  ctx.fillStyle = '#cfa76a';
+  ctx.fillRect(x - 8, y - 8, 3, 1);
+  ctx.fillRect(x + w + 4, y - 8, 3, 1);
+
+  // Musgo, tréboles y un nido de pájaro en la cumbrera.
+  for (let i = 0; i < 5; i += 1) {
+    const mx = x + 4 + Math.floor(hash2(seed + i * 5, y) * (w - 12));
+    const my = y + 7 + Math.floor(hash2(x, seed + i * 9) * (h - 14));
+    ctx.fillStyle = 'rgba(104, 150, 66, 0.6)';
+    ctx.fillRect(mx, my, 5, 2);
+    ctx.fillStyle = 'rgba(160, 200, 108, 0.4)';
+    ctx.fillRect(mx + 1, my, 2, 1);
+  }
+  ctx.fillStyle = '#6b4a22';
+  ctx.fillRect(x + Math.round(w * 0.64), y - 8, 6, 3);
+  ctx.fillStyle = '#d9b06a';
+  ctx.fillRect(x + Math.round(w * 0.64) + 1, y - 7, 4, 1);
+}
+
+
+/** Tejamanil verde bosque con escamas, canalón y remate de cumbrera. */
+function drawShingleRoof(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  seed: number
+): void {
+  const pal = NATAL_SHINGLE_ROOF;
+  ctx.fillStyle = '#0c1c16';
+  ctx.fillRect(x - 3, y - 2, w + 6, h + 6);
+  ctx.fillStyle = pal.mid;
+  ctx.fillRect(x - 2, y, w + 4, h + 3);
+
+  const rows = Math.max(4, Math.ceil(h / 4));
+  for (let r = 0; r < rows; r += 1) {
+    const ry = y + r * 4;
+    const offset = (r % 2) * 3;
+    for (let tx = x - 2 + offset; tx < x + w + 2; tx += 6) {
+      const th = hash2(tx * 5 + r * 13, y + seed * 23);
+      const tone = th > 0.76 ? pal.hi : th > 0.46 ? pal.light : th > 0.2 ? pal.mid : pal.dark;
+      ctx.fillStyle = tone;
+      ctx.fillRect(tx, ry, 5, 4);
+      // Escama redondeada inferior.
+      ctx.fillRect(tx + 1, ry + 4, 3, 1);
+      ctx.fillStyle = 'rgba(150, 208, 172, 0.22)';
+      ctx.fillRect(tx, ry, 4, 1);
+      ctx.fillStyle = 'rgba(4, 16, 12, 0.5)';
+      ctx.fillRect(tx, ry + 4, 1, 1);
+      if (th > 0.86) {
+        ctx.fillStyle = 'rgba(196, 232, 200, 0.4)';
+        ctx.fillRect(tx + 2, ry + 1, 1, 1);
+      }
+    }
+  }
+  // Tablas de alero y festón inferior.
+  const bottomY = y + rows * 4;
+  ctx.fillStyle = '#0f231a';
+  ctx.fillRect(x - 3, bottomY, w + 6, 3);
+  for (let tx = x - 3; tx < x + w + 4; tx += 6) {
+    ctx.fillStyle = tx % 12 === 0 ? pal.ridgeHi : pal.mid;
+    ctx.fillRect(tx, bottomY, 5, 2);
+  }
+  // Cumbrera de tabla con veleta de forja.
+  ctx.fillStyle = pal.ridge;
+  ctx.fillRect(x - 4, y - 6, w + 8, 6);
+  ctx.fillStyle = pal.ridgeHi;
+  ctx.fillRect(x - 3, y - 5, w + 6, 2);
+  ctx.fillStyle = '#7fae92';
+  ctx.fillRect(x - 2, y - 5, w + 4, 1);
+  ctx.fillStyle = '#22352c';
+  ctx.fillRect(x + Math.round(w * 0.5), y - 14, 2, 9);
+  ctx.fillStyle = '#9bb8a6';
+  ctx.fillRect(x + Math.round(w * 0.5) - 3, y - 14, 8, 1);
+  ctx.fillRect(x + Math.round(w * 0.5) + 2, y - 13, 3, 2);
+  // Musgo húmedo en las escamas.
+  for (let i = 0; i < 4; i += 1) {
+    const mx = x + 4 + Math.floor(hash2(seed + i * 3, y + i * 7) * (w - 10));
+    const my = y + 5 + Math.floor(hash2(x + i * 5, seed + i) * (h - 9));
+    ctx.fillStyle = 'rgba(94, 146, 90, 0.55)';
+    ctx.fillRect(mx, my, 5, 2);
+  }
+}
+
+/** Hastial triangular con tablones, entramado Tudor y ventana de desván. */
+function drawGableFace(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  peakY: number,
+  eaveY: number,
+  halfW: number,
+  seed: number,
+  mode: 'boards' | 'tudor',
+  lit: boolean
+): void {
+  const height = eaveY - peakY;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx, peakY);
+  ctx.lineTo(cx + halfW, eaveY);
+  ctx.lineTo(cx - halfW, eaveY);
+  ctx.closePath();
+  ctx.clip();
+
+  if (mode === 'tudor') {
+    ctx.fillStyle = '#d9c9a8';
+    ctx.fillRect(cx - halfW, peakY, halfW * 2, height);
+    // Manchas de estuco envejecido.
+    for (let i = 0; i < 8; i += 1) {
+      const th = hash2(seed + i * 11, cx + i * 3);
+      ctx.fillStyle = th > 0.5 ? 'rgba(178, 152, 110, 0.28)' : 'rgba(246, 236, 214, 0.34)';
+      ctx.fillRect(cx - halfW + 2 + th * (halfW * 2 - 8), peakY + 2 + (i * height) / 9, 5 + (i % 3) * 3, 2);
+    }
+    // Entramado: montantes, tornapuntas y solera.
+    ctx.fillStyle = '#4a2e1a';
+    ctx.fillRect(cx - halfW, eaveY - 4, halfW * 2, 4);
+    ctx.fillRect(cx - 1, peakY, 2, height);
+    for (let i = 1; i <= 2; i += 1) {
+      const y = peakY + (height * i) / 3;
+      const spread = ((y - peakY) / height) * halfW - 2;
+      ctx.fillRect(cx - spread, y, spread * 2, 2);
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx - halfW, eaveY);
+    ctx.lineTo(cx, peakY);
+    ctx.lineTo(cx + halfW, eaveY);
+    ctx.closePath();
+    ctx.clip();
+    ctx.strokeStyle = '#4a2e1a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - halfW + 2, eaveY - 2);
+    ctx.lineTo(cx - halfW * 0.35, eaveY - height * 0.35);
+    ctx.moveTo(cx + halfW - 2, eaveY - 2);
+    ctx.lineTo(cx + halfW * 0.35, eaveY - height * 0.35);
+    ctx.stroke();
+    ctx.restore();
+  } else {
+    // Tablones verticales cálidos con veta y clavos.
+    ctx.fillStyle = '#5b3a22';
+    ctx.fillRect(cx - halfW, peakY, halfW * 2, height);
+    for (let px = cx - halfW + 1; px < cx + halfW; px += 4) {
+      const th = hash2(px + seed * 7, peakY);
+      ctx.fillStyle = th > 0.66 ? '#7d5432' : th > 0.3 ? '#6b4528' : '#5d3b21';
+      ctx.fillRect(px, peakY, 3, height);
+      ctx.fillStyle = 'rgba(196, 142, 88, 0.4)';
+      ctx.fillRect(px, peakY, 1, height);
+      ctx.fillStyle = 'rgba(40, 24, 12, 0.55)';
+      ctx.fillRect(px + 3, peakY, 1, height);
+    }
+    // Viga horizontal y tirante central.
+    ctx.fillStyle = '#3a2313';
+    ctx.fillRect(cx - halfW, eaveY - 4, halfW * 2, 4);
+    ctx.fillRect(cx - 1, peakY + 3, 2, height);
+    ctx.fillStyle = '#8f6038';
+    ctx.fillRect(cx - 1, peakY + 4, 1, height);
+  }
+
+  // Ventana de desván con marco grueso y luz interior.
+  const winW = Math.min(12, Math.round(halfW * 0.5));
+  const winH = Math.min(11, Math.round(height * 0.34));
+  const wx = cx - Math.round(winW / 2);
+  const wy = peakY + Math.round(height * 0.36);
+  if (height > 18) {
+    ctx.fillStyle = '#23160d';
+    ctx.fillRect(wx - 2, wy - 2, winW + 4, winH + 4);
+    ctx.fillStyle = '#e8d8b8';
+    ctx.fillRect(wx - 1, wy - 1, winW + 2, winH + 2);
+    ctx.fillStyle = '#2a1c12';
+    ctx.fillRect(wx, wy, winW, winH);
+    ctx.fillStyle = lit ? '#f7c978' : '#6d8378';
+    ctx.fillRect(wx + 1, wy + 1, winW - 2, winH - 2);
+    if (lit) {
+      ctx.fillStyle = 'rgba(255, 240, 198, 0.75)';
+      ctx.fillRect(wx + 2, wy + 2, 3, 3);
+    }
+    ctx.fillStyle = '#3b2414';
+    ctx.fillRect(wx + Math.floor(winW / 2), wy, 1, winH);
+    ctx.fillRect(wx, wy + Math.floor(winH / 2), winW, 1);
+  }
+  ctx.restore();
+
+  // Bargeboards de roble que enmarcan la caída del tejado.
+  ctx.strokeStyle = '#3a2212';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx - halfW - 1, eaveY + 1);
+  ctx.lineTo(cx, peakY - 1);
+  ctx.lineTo(cx + halfW + 1, eaveY + 1);
+  ctx.stroke();
+  ctx.strokeStyle = '#9d6b41';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - halfW, eaveY - 1);
+  ctx.lineTo(cx, peakY + 1);
+  ctx.lineTo(cx + halfW, eaveY - 1);
+  ctx.stroke();
+  // Remate colgante en la punta del hastial.
+  ctx.fillStyle = '#3a2212';
+  ctx.fillRect(cx - 1, peakY - 8, 3, 9);
+  ctx.fillStyle = '#c49a63';
+  ctx.fillRect(cx, peakY - 7, 1, 6);
+  // Alero inferior del hastial.
+  ctx.fillStyle = '#2f1d10';
+  ctx.fillRect(cx - halfW - 2, eaveY, halfW * 2 + 4, 3);
+  ctx.fillStyle = 'rgba(214, 170, 112, 0.55)';
+  ctx.fillRect(cx - halfW - 1, eaveY, halfW * 2 + 2, 1);
+}
+
+/** Chimenea de sillares con sombrero de piedra y humo suave. */
+function drawStoneChimney(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  seed: number,
+  elapsed: number,
+  reducedMotion: boolean,
+  smoke: boolean
+): void {
+  // Sombra sobre la cubierta.
+  ctx.fillStyle = 'rgba(8, 10, 8, 0.35)';
+  ctx.fillRect(x + 2, y + h - 1, w + 5, 3);
+  ctx.fillStyle = '#2b2c28';
+  ctx.fillRect(x - 1, y, w + 2, h);
+  ctx.fillStyle = '#6f7266';
+  ctx.fillRect(x, y + 1, w, h - 1);
+  for (let py = y + 2, row = 0; py < y + h - 1; py += 4, row += 1) {
+    const odd = (row % 2) * 3;
+    for (let px = x + 1 + odd; px < x + w - 1; px += 6) {
+      const th = hash2(px + seed * 5, py);
+      ctx.fillStyle = th > 0.6 ? '#8a8d80' : th > 0.3 ? '#75786c' : '#606358';
+      ctx.fillRect(px, py, 5, 3);
+      ctx.fillStyle = 'rgba(232, 228, 208, 0.3)';
+      ctx.fillRect(px, py, 4, 1);
+      if (th < 0.24) {
+        ctx.fillStyle = 'rgba(88, 134, 64, 0.5)';
+        ctx.fillRect(px + 1, py + 2, 3, 1);
+      }
+    }
+  }
+  // Remate y boca ahumada.
+  ctx.fillStyle = '#383a34';
+  ctx.fillRect(x - 2, y - 3, w + 4, 4);
+  ctx.fillStyle = '#9a9d8e';
+  ctx.fillRect(x - 1, y - 3, w + 2, 2);
+  ctx.fillStyle = '#161814';
+  ctx.fillRect(x + 2, y - 2, w - 4, 2);
+  ctx.fillStyle = 'rgba(20, 22, 18, 0.55)';
+  ctx.fillRect(x, y - 1, w, 2);
+  if (smoke && !reducedMotion) {
+    for (let i = 0; i < 7; i += 1) {
+      const st = (elapsed * 0.24 + i / 7) % 1;
+      const alpha = 0.26 * (1 - st);
+      ctx.fillStyle = `rgba(232, 238, 244, ${alpha.toFixed(3)})`;
+      const sx = x + w * 0.5 + Math.sin(st * 6.4 + i) * 9;
+      const sy = y - 5 - st * 46;
+      const size = 2 + Math.round(st * 5);
+      ctx.fillRect(Math.round(sx), Math.round(sy), size, size - 1);
+    }
+  }
+}
+
+/** Ventana profunda con marco biselado, reflejos y alféizar. */
+function drawWindowDeep(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  opts: {
+    lit?: boolean;
+    flicker?: number;
+    frame?: 'stone' | 'wood';
+    shutters?: 'none' | 'green' | 'rose';
+    box?: boolean;
+    boxColor?: string;
+    tint?: 'warm' | 'cool';
+  } = {}
+): void {
+  const lit = opts.lit !== false;
+  const flicker = opts.flicker ?? 0.85;
+  const frame = opts.frame ?? 'wood';
+  const tint = opts.tint ?? 'warm';
+  // Marco exterior con bisel.
+  ctx.fillStyle = frame === 'stone' ? '#2a2620' : '#24150c';
+  ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+  ctx.fillStyle = frame === 'stone' ? '#a8a08d' : '#7c5230';
+  ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
+  ctx.fillStyle = frame === 'stone' ? '#d6cdb6' : '#a9794c';
+  ctx.fillRect(x - 1, y - 1, w + 2, 1);
+  ctx.fillRect(x - 1, y - 1, 1, h + 2);
+  ctx.fillStyle = 'rgba(30, 18, 10, 0.55)';
+  ctx.fillRect(x, y + h, w + 1, 1);
+  // Hueco oscuro y cristal.
+  ctx.fillStyle = '#1a1009';
+  ctx.fillRect(x, y, w, h);
+  if (lit) {
+    const g = ctx.createLinearGradient(0, y, 0, y + h);
+    if (tint === 'cool') {
+      g.addColorStop(0, 'rgba(168, 240, 246, 0.82)');
+      g.addColorStop(0.5, `rgba(112, 212, 226, ${(0.68 + flicker * 0.2).toFixed(2)})`);
+      g.addColorStop(1, 'rgba(48, 112, 122, 0.9)');
+    } else {
+      g.addColorStop(0, 'rgba(255, 224, 156, 0.7)');
+      g.addColorStop(0.5, `rgba(255, 190, 100, ${(0.7 + flicker * 0.22).toFixed(2)})`);
+      g.addColorStop(1, 'rgba(176, 96, 40, 0.85)');
+    }
+    ctx.fillStyle = g;
+  } else {
+    const g = ctx.createLinearGradient(0, y, 0, y + h);
+    g.addColorStop(0, '#9fc3c4');
+    g.addColorStop(0.55, '#5f7f80');
+    g.addColorStop(1, '#314a4b');
+    ctx.fillStyle = g;
+  }
+  ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  // Reflejo diagonal del cielo.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x + 1, y + 1, w - 2, h - 2);
+  ctx.clip();
+  ctx.fillStyle = lit ? 'rgba(255, 250, 226, 0.34)' : 'rgba(214, 240, 244, 0.4)';
+  ctx.beginPath();
+  ctx.moveTo(x + 1, y + h * 0.55);
+  ctx.lineTo(x + w * 0.55, y + 1);
+  ctx.lineTo(x + w * 0.8, y + 1);
+  ctx.lineTo(x + 1, y + h * 0.82);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = lit ? 'rgba(255, 244, 208, 0.7)' : 'rgba(240, 252, 252, 0.6)';
+  ctx.fillRect(x + 2, y + 2, 2, 2);
+  ctx.restore();
+  // Cuarterones y cruz.
+  ctx.fillStyle = '#3b2414';
+  ctx.fillRect(x + Math.floor(w / 2), y + 1, 1, h - 2);
+  ctx.fillRect(x + 1, y + Math.floor(h / 2), w - 2, 1);
+  ctx.fillStyle = 'rgba(255, 236, 190, 0.18)';
+  ctx.fillRect(x + Math.floor(w / 2) + 1, y + 1, 1, h - 2);
+  // Alféizar de madera/piedra y sombra inferior.
+  ctx.fillStyle = frame === 'stone' ? '#8a8474' : '#5c3b22';
+  ctx.fillRect(x - 3, y + h + 2, w + 6, 2);
+  ctx.fillStyle = frame === 'stone' ? '#c2baa3' : '#9c6a40';
+  ctx.fillRect(x - 3, y + h + 2, w + 6, 1);
+  ctx.fillStyle = 'rgba(16, 10, 6, 0.45)';
+  ctx.fillRect(x - 2, y + h + 4, w + 5, 1);
+  // Postigos de madera con listones.
+  if (opts.shutters && opts.shutters !== 'none') {
+    const shutter = opts.shutters === 'green' ? '#2d4f43' : '#6b3b32';
+    const shutterHi = opts.shutters === 'green' ? '#4f7a67' : '#96604f';
+    for (const side of [-1, 1]) {
+      const sx = side < 0 ? x - 6 : x + w + 2;
+      ctx.fillStyle = '#21140b';
+      ctx.fillRect(sx, y - 1, 4, h + 3);
+      ctx.fillStyle = shutter;
+      ctx.fillRect(sx + (side < 0 ? 1 : 0), y, 3, h + 1);
+      for (let sy = y + 2; sy < y + h; sy += 3) {
+        ctx.fillStyle = 'rgba(8, 16, 12, 0.4)';
+        ctx.fillRect(sx + (side < 0 ? 1 : 0), sy, 3, 1);
+      }
+      ctx.fillStyle = shutterHi;
+      ctx.fillRect(sx + (side < 0 ? 1 : 0), y, 1, h + 1);
+    }
+  }
+  // Jardinera con flores bajo el alféizar.
+  if (opts.box) {
+    drawWindowPlanter(ctx, x - 1, y + h + 5, w + 2, opts.boxColor);
+  }
+}
+
+/** Jardinera de madera con flores silvestres. */
+function drawWindowPlanter(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  flower: string = '#f472b6'
+): void {
+  ctx.fillStyle = 'rgba(10, 8, 4, 0.35)';
+  ctx.fillRect(x, y + 5, w, 2);
+  ctx.fillStyle = '#3f2817';
+  ctx.fillRect(x, y, w, 5);
+  ctx.fillStyle = '#7d5432';
+  ctx.fillRect(x + 1, y + 1, w - 2, 2);
+  ctx.fillStyle = '#a9794c';
+  ctx.fillRect(x + 1, y + 1, w - 2, 1);
+  ctx.fillStyle = '#3b2a14';
+  ctx.fillRect(x + 2, y - 1, w - 4, 2);
+  for (let i = 0; i < Math.floor(w / 3); i += 1) {
+    const fx = x + 2 + i * 3;
+    const th = hash2(fx, y);
+    ctx.fillStyle = th > 0.5 ? '#3f7a34' : '#5d9a44';
+    ctx.fillRect(fx, y - 3, 1, 3);
+    ctx.fillStyle = th > 0.55 ? flower : th > 0.3 ? '#fde68a' : '#f8fafc';
+    ctx.fillRect(fx - 1, y - 4, 2, 2);
+  }
+  // Follaje colgante: guías cortas que caen por delante del muro, como en las casas de referencia.
+  const trails = 1 + Math.floor(w / 7);
+  for (let i = 0; i < trails; i += 1) {
+    const th = hash2(x + i * 13, y - 5);
+    const fx = x + 2 + Math.floor((i + 0.5) * ((w - 4) / trails));
+    const len = 2 + Math.floor(th * 4);
+    ctx.fillStyle = 'rgba(20, 52, 24, 0.85)';
+    ctx.fillRect(fx, y + 4, 1, len);
+    ctx.fillStyle = th > 0.5 ? '#3f7a34' : '#5d9a44';
+    ctx.fillRect(fx, y + 5, 1, Math.max(1, len - 1));
+    if (th > 0.66) {
+      ctx.fillStyle = '#8dd07a';
+      ctx.fillRect(fx + (i % 2 === 0 ? 1 : -1), y + 5 + Math.floor(th * len), 1, 1);
+    }
+    if (th > 0.82) {
+      ctx.fillStyle = th > 0.92 ? '#f8fafc' : flower;
+      ctx.fillRect(fx - 1, y + 4 + len, 2, 2);
+    }
+  }
+}
+
+/** Sillares esquineros alternos con bisel y junta sombreada. */
+function drawStoneQuoins(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  dark: string,
+  mid: string,
+  light: string
+): void {
+  let row = 0;
+  for (let py = y + 1; py < y + h - 3; py += 6, row += 1) {
+    const qw = row % 2 === 0 ? 5 : 4;
+    for (const qx of [x, x + w - qw]) {
+      ctx.fillStyle = dark;
+      ctx.fillRect(qx, py, qw, 6);
+      ctx.fillStyle = mid;
+      ctx.fillRect(qx + 1, py + 1, qw - 2, 4);
+      ctx.fillStyle = light;
+      ctx.fillRect(qx + 1, py + 1, qw - 2, 1);
+      ctx.fillStyle = 'rgba(22, 20, 16, 0.32)';
+      ctx.fillRect(qx, py + 5, qw, 1);
+    }
+  }
+}
+
+/** Rosal trepador sobre enrejado de madera, con hojas y rosas abiertas. */
+function drawClimbingRose(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  topY: number,
+  baseY: number,
+  seed: number,
+  bloom: string
+): void {
+  // Enrejado mínimo de listones cruzados.
+  ctx.fillStyle = 'rgba(52, 33, 18, 0.9)';
+  ctx.fillRect(x, topY, 1, baseY - topY);
+  ctx.fillRect(x + 5, topY, 1, baseY - topY);
+  for (let ry = topY + 4; ry < baseY; ry += 7) {
+    ctx.fillStyle = 'rgba(74, 48, 26, 0.8)';
+    ctx.fillRect(x, ry, 6, 1);
+    ctx.fillStyle = 'rgba(160, 112, 66, 0.5)';
+    ctx.fillRect(x, ry, 5, 1);
+  }
+  // Tallos que serpentean por los listones.
+  for (let i = 0; i < 2; i += 1) {
+    const px = x + (i === 0 ? 2 : 4);
+    for (let py = baseY - 1; py > topY + 1; py -= 1) {
+      const sway = Math.round(Math.sin((baseY - py) * 0.38 + seed + i * 1.7) * 1.6);
+      ctx.fillStyle = (py + i) % 3 === 0 ? '#1f5128' : '#2f7333';
+      ctx.fillRect(px + sway, py, 1, 1);
+      if ((baseY - py) % 4 === 0) {
+        const side = (py + i) % 2 === 0 ? 1 : -1;
+        ctx.fillStyle = '#4f9a45';
+        ctx.fillRect(px + sway + side, py, 2, 1);
+        if ((py + i) % 4 === 0) {
+          ctx.fillStyle = '#7fcb66';
+          ctx.fillRect(px + sway + (side > 0 ? 1 : 0), py - 1, 1, 1);
+        }
+      }
+    }
+  }
+  // Rosas abiertas y capullos repartidos por la guía.
+  for (let i = 0; i < 4; i += 1) {
+    const fy =
+      topY +
+      6 +
+      Math.floor(((baseY - topY - 12) / 4) * i) +
+      Math.floor(hash2(seed + i, x) * 4);
+    const sway = Math.round(
+      Math.sin((baseY - fy) * 0.38 + seed + (i % 2) * 1.7) * 1.6
+    );
+    const fx = x + (i % 2 === 0 ? 2 : 4) + sway;
+    ctx.fillStyle = 'rgba(20, 40, 24, 0.5)';
+    ctx.fillRect(fx - 1, fy + 2, 3, 1);
+    if (i % 3 === 2) {
+      ctx.fillStyle = bloom;
+      ctx.fillRect(fx, fy, 1, 2);
+      ctx.fillStyle = '#fdf2f8';
+      ctx.fillRect(fx, fy, 1, 1);
+    } else {
+      ctx.fillStyle = bloom;
+      ctx.fillRect(fx - 1, fy - 1, 3, 2);
+      ctx.fillRect(fx, fy - 2, 1, 1);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+      ctx.fillRect(fx - 1, fy - 1, 1, 1);
+      ctx.fillStyle = '#fde68a';
+      ctx.fillRect(fx, fy - 1, 1, 1);
+    }
+    ctx.fillStyle = '#2c6b31';
+    ctx.fillRect(fx + 2, fy + 1, 2, 1);
+    ctx.fillStyle = '#6cb45c';
+    ctx.fillRect(fx + 2, fy + 1, 1, 1);
+  }
+}
+
+/** Puerta de tablones con marco de piedra, herrajes y umbral. */
+function drawDoorDeep(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  opts: {
+    frame?: 'stone' | 'wood';
+    arch?: boolean;
+    tone?: 'oak' | 'walnut';
+    handleX?: number;
+    steps?: boolean;
+  } = {}
+): void {
+  const frame = opts.frame ?? 'stone';
+  const tone = opts.tone ?? 'oak';
+  // Marco de cantería.
+  ctx.fillStyle = '#2a2620';
+  ctx.fillRect(x - 4, y - 5, w + 8, h + 5);
+  ctx.fillStyle = frame === 'stone' ? '#a8a08d' : '#5b3b22';
+  ctx.fillRect(x - 3, y - 4, w + 6, h + 4);
+  ctx.fillStyle = frame === 'stone' ? '#ded6c1' : '#8f6038';
+  ctx.fillRect(x - 3, y - 4, w + 6, 1);
+  ctx.fillRect(x - 3, y - 4, 1, h + 4);
+  ctx.fillStyle = 'rgba(42, 34, 24, 0.5)';
+  for (let sy = y + 4; sy < y + h + 2; sy += 6) {
+    ctx.fillRect(x - 3, sy, 4, 1);
+    ctx.fillRect(x + w - 1, sy, 4, 1);
+  }
+  if (opts.arch) {
+    ctx.fillStyle = frame === 'stone' ? '#8f8876' : '#4a2e1a';
+    ctx.fillRect(x - 2, y - 8, w + 4, 4);
+    ctx.fillStyle = frame === 'stone' ? '#d6cdb6' : '#a9794c';
+    ctx.fillRect(x - 1, y - 8, w + 2, 1);
+    ctx.fillStyle = '#2a2620';
+    ctx.fillRect(x + Math.floor(w / 2) - 1, y - 8, 1, 4);
+  }
+  // Hoja de puerta.
+  ctx.fillStyle = '#24160c';
+  ctx.fillRect(x, y, w, h);
+  const baseCol = tone === 'walnut' ? '#5c3a23' : '#6f4829';
+  const liteCol = tone === 'walnut' ? '#7d5434' : '#8b5d36';
+  ctx.fillStyle = baseCol;
+  ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = liteCol;
+  ctx.fillRect(x + 1, y + 1, w - 2, 1);
+  for (let px = x + 3; px < x + w - 2; px += 3) {
+    ctx.fillStyle = 'rgba(36, 20, 10, 0.55)';
+    ctx.fillRect(px, y + 1, 1, h - 2);
+    ctx.fillStyle = 'rgba(214, 164, 108, 0.32)';
+    ctx.fillRect(px + 1, y + 2, 1, h - 5);
+  }
+  // Herrajes de forja con remaches.
+  for (const hy of [y + Math.round(h * 0.22), y + Math.round(h * 0.68)]) {
+    ctx.fillStyle = '#1f2229';
+    ctx.fillRect(x + 1, hy, w - 4, 2);
+    ctx.fillStyle = '#4a4f58';
+    ctx.fillRect(x + 1, hy, w - 4, 1);
+    for (let rivet = x + 3; rivet < x + w - 3; rivet += 5) {
+      ctx.fillStyle = '#8b929c';
+      ctx.fillRect(rivet, hy, 1, 1);
+    }
+  }
+  // Aldaba de anilla.
+  const hx = x + (opts.handleX ?? w - 5);
+  ctx.fillStyle = 'rgba(20, 12, 6, 0.5)';
+  ctx.fillRect(hx - 2, y + Math.round(h * 0.48), 5, 5);
+  ctx.fillStyle = '#c79a34';
+  ctx.fillRect(hx - 1, y + Math.round(h * 0.48), 3, 3);
+  ctx.fillStyle = '#fff0b8';
+  ctx.fillRect(hx - 1, y + Math.round(h * 0.48), 1, 1);
+  ctx.fillStyle = '#22252c';
+  ctx.fillRect(hx, y + Math.round(h * 0.54), 1, 2);
+  // Umbral de piedra y escalones.
+  const thresholdY = y + h;
+  ctx.fillStyle = 'rgba(20, 14, 8, 0.45)';
+  ctx.fillRect(x - 5, thresholdY, w + 10, 2);
+  ctx.fillStyle = '#c49d6c';
+  ctx.fillRect(x - 4, thresholdY, w + 8, 3);
+  ctx.fillStyle = 'rgba(255, 242, 214, 0.55)';
+  ctx.fillRect(x - 3, thresholdY, w + 6, 1);
+  if (opts.steps !== false) {
+    ctx.fillStyle = '#8a7458';
+    ctx.fillRect(x - 6, thresholdY + 3, w + 12, 2);
+    ctx.fillStyle = '#b7a184';
+    ctx.fillRect(x - 6, thresholdY + 3, w + 12, 1);
+    ctx.fillStyle = 'rgba(16, 10, 6, 0.4)';
+    ctx.fillRect(x - 5, thresholdY + 5, w + 10, 1);
+  }
+}
+
+/** Barril de roble con aros de hierro. */
+function drawBarrelProp(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  baseY: number,
+  scale = 1
+): void {
+  const w = Math.round(11 * scale);
+  const h = Math.round(12 * scale);
+  ctx.fillStyle = 'rgba(12, 8, 4, 0.4)';
+  ctx.beginPath();
+  ctx.ellipse(x + w * 0.5, baseY + 1, w * 0.55, 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#3b2414';
+  ctx.fillRect(x, baseY - h, w, h);
+  ctx.fillStyle = '#7c512f';
+  ctx.fillRect(x + 1, baseY - h, w - 2, h - 1);
+  ctx.fillStyle = '#9c6a40';
+  ctx.fillRect(x + 2, baseY - h + 1, w - 4, 2);
+  ctx.fillStyle = 'rgba(58, 38, 20, 0.5)';
+  ctx.fillRect(x + 2, baseY - h + 4, w - 4, 1);
+  ctx.fillStyle = '#32363d';
+  ctx.fillRect(x + 1, baseY - h + 3, w - 2, 1);
+  ctx.fillRect(x + 1, baseY - h + 8, w - 2, 1);
+  ctx.fillStyle = '#9aa0a6';
+  ctx.fillRect(x + 1, baseY - h + 3, w - 2, 1);
+  ctx.fillStyle = '#4a2e1a';
+  ctx.beginPath();
+  ctx.ellipse(x + w * 0.5, baseY - h + 1, w * 0.44, 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#8a5d34';
+  ctx.beginPath();
+  ctx.ellipse(x + w * 0.5, baseY - h + 1, w * 0.34, 1.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/** Caja de madera con refuerzos en aspa. */
+function drawCrateProp(ctx: CanvasRenderingContext2D, x: number, baseY: number, size = 12): void {
+  const h = Math.round(size * 0.82);
+  ctx.fillStyle = 'rgba(12, 8, 4, 0.38)';
+  ctx.fillRect(x - 1, baseY, size + 2, 2);
+  ctx.fillStyle = '#3b2414';
+  ctx.fillRect(x, baseY - h, size, h);
+  ctx.fillStyle = '#8a613c';
+  ctx.fillRect(x + 1, baseY - h + 1, size - 2, h - 2);
+  ctx.fillStyle = '#b07d4f';
+  ctx.fillRect(x + 1, baseY - h + 1, size - 2, 1);
+  ctx.fillStyle = '#5c3b22';
+  ctx.fillRect(x + 1, baseY - h + 3, size - 2, 1);
+  ctx.fillRect(x + 1, baseY - 3, size - 2, 1);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(74, 46, 26, 0.8)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + 2, baseY - h + 2);
+  ctx.lineTo(x + size - 2, baseY - 3);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: boolean): void {
   const { x, y } = HUT_POS;
   const s = ISLA_NATAL_SOLIDS.find((v) => v.id === 'cabana');
@@ -5266,13 +6692,8 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
   const eastBodyX = x + 38;
   const eastBodyW = w - 34; // 78 px -> hasta x + 116
 
-  // 1. Sombra de Oclusión Ambiental Profunda y Contact Shadow en la base
-  ctx.fillStyle = 'rgba(6, 12, 8, 0.58)';
-  ctx.beginPath();
-  ctx.ellipse(x + w * 0.52 + 4, baseY + 3, w * 0.58 + 10, 11, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = 'rgba(2, 6, 4, 0.72)';
-  ctx.fillRect(x - 8, baseY - 2, w + 20, 4);
+  // 1. Sombra de contacto y proyección sobre la pradera.
+  drawHouseGroundShadow(ctx, x, baseY, w);
 
   // 3. Conexión de Caminos en las Puertas (Access Trail)
   // Tramo de tierra batida, barro y empedrado desde el umbral (doorX ≈ 662) hacia la plaza y sendero
@@ -5377,6 +6798,11 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
       ctx.fillRect(px, py, 9, 5);
       ctx.fillStyle = 'rgba(188, 198, 176, 0.22)';
       ctx.fillRect(px, py, 7, 1);
+      // Pitting y grano de la piedra.
+      if (th > 0.56) {
+        ctx.fillStyle = 'rgba(24, 28, 20, 0.3)';
+        ctx.fillRect(px + 2 + Math.floor(th * 5), py + 2, 1, 1);
+      }
       if (th < 0.24) {
         ctx.fillStyle = 'rgba(84, 128, 62, 0.45)';
         ctx.fillRect(px + 1, py + 3, 5, 2);
@@ -5418,12 +6844,47 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
       ctx.fillRect(px, py, 8, 1);
       ctx.fillStyle = 'rgba(30, 28, 22, 0.42)';
       ctx.fillRect(px, py + 4, 10, 1);
+      // Grano, poros y musgo en las juntas.
+      if (th > 0.5) {
+        ctx.fillStyle = 'rgba(34, 32, 24, 0.3)';
+        ctx.fillRect(px + 2 + Math.floor(th * 5), py + 2, 1, 1);
+      }
       if (py > baseY - 12 && th < 0.35) {
         ctx.fillStyle = 'rgba(82, 130, 58, 0.5)';
         ctx.fillRect(px + 1, py + 2, 6, 2);
       }
     }
   }
+
+  // Sillares esquineros y humedad ascendente en el zócalo este.
+  drawStoneQuoins(
+    ctx,
+    eastBodyX,
+    eastStoneTop,
+    eastBodyW,
+    baseY - eastStoneTop,
+    '#4b463c',
+    '#8b8577',
+    '#c6bda6'
+  );
+  for (let i = 0; i < 5; i += 1) {
+    const sx = eastBodyX + 6 + Math.floor(hash2(i * 17 + x, y + 3) * (eastBodyW - 14));
+    const sy = eastStoneTop + 5 + Math.floor(hash2(x + i, y + 9) * 14);
+    ctx.fillStyle = 'rgba(46, 58, 42, 0.16)';
+    ctx.fillRect(sx, sy, 1, baseY - sy - 10);
+  }
+  drawStoneQuoins(
+    ctx,
+    westWingX + 3,
+    westStoneTop,
+    westWingW - 6,
+    baseY - westStoneTop,
+    '#3f443c',
+    '#6e7568',
+    '#bcc4b0'
+  );
+  // Rosal trepador entre la leñera y la puerta, sobre enrejado de madera.
+  drawClimbingRose(ctx, eastBodyX + 1, y + 58, baseY - 2, 5, '#f472b6');
 
   // 5. Planta media de madera entramada y vigas vistas (usando textura adjunta de madera)
   // Caja saliente de troncos ensamblados en el ala oeste
@@ -5491,6 +6952,15 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
     ctx.fillRect(px, eastTimberTop + eastTimberH - 6, pw, 3);
     ctx.fillStyle = 'rgba(255, 246, 224, 0.45)';
     ctx.fillRect(px, eastTimberTop + 3, pw, 2);
+    // Pernos de roble en los encuentros del entramado.
+    ctx.fillStyle = 'rgba(58, 38, 20, 0.82)';
+    ctx.fillRect(px + 1, eastTimberTop + 4, 1, 1);
+    ctx.fillRect(px + pw - 2, eastTimberTop + eastTimberH - 5, 1, 1);
+    // Lluvia y desgaste: vetas verticales tenues en el estuco.
+    if (i % 2 === 0) {
+      ctx.fillStyle = 'rgba(86, 64, 40, 0.14)';
+      ctx.fillRect(px + 3, eastTimberTop + 4, 1, 8 + i * 2);
+    }
   }
   // Viga maestra divisoria con cabezas talladas
   ctx.fillStyle = '#4a2e1a';
@@ -5500,86 +6970,54 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
   // Dos ventanas de madera con cuarterones iluminados en la planta alta este
   for (const wx of [eastBodyX + 14, eastBodyX + 51]) {
     const wy = eastTimberTop + 5;
-    ctx.fillStyle = '#2a180d';
-    ctx.fillRect(wx - 1, wy - 1, 13, 15);
-    ctx.fillStyle = '#6f4828';
-    ctx.fillRect(wx, wy, 11, 13);
-    ctx.fillStyle = `rgba(255, 204, 118, ${(flicker * 0.92).toFixed(2)})`;
-    ctx.fillRect(wx + 1, wy + 1, 9, 10);
-    ctx.fillStyle = 'rgba(255, 242, 198, 0.55)';
-    ctx.fillRect(wx + 2, wy + 2, 3, 3);
-    ctx.fillStyle = '#3b2414';
-    ctx.fillRect(wx + 5, wy + 1, 1, 10);
-    ctx.fillRect(wx + 1, wy + 5, 9, 1);
-    // Jardinera con flores bajo la ventana alta
-    ctx.fillStyle = '#5c3b22';
-    ctx.fillRect(wx - 1, wy + 12, 13, 3);
-    ctx.fillStyle = '#3f8a41';
-    ctx.fillRect(wx + 1, wy + 10, 9, 2);
-    ctx.fillStyle = wx < eastBodyX + 30 ? '#f9a8d4' : '#fde68a';
-    ctx.fillRect(wx + 2, wy + 9, 2, 2);
-    ctx.fillRect(wx + 7, wy + 9, 2, 2);
+    drawWindowDeep(ctx, wx, wy, 11, 13, {
+      lit: true,
+      flicker,
+      frame: 'wood',
+      box: true,
+      boxColor: wx < eastBodyX + 30 ? '#f9a8d4' : '#fde68a',
+    });
   }
 
   // 6. Puerta principal arqueada de piedra y ventana baja con postigos en el cuerpo este
   // Coordenada exacta alineada con el POI 'puerta-cabana' (x ≈ 506, umbral en plaza-umbral-casa)
   const doorX = x + w - 46; // 496 (centro 508)
   const doorY = baseY - 33; // 755
-  // Arco de dovelas de piedra alrededor de la puerta (como en las fotos 5 y 6)
-  ctx.fillStyle = '#2a2620';
-  ctx.fillRect(doorX - 4, doorY - 4, 28, 34);
-  ctx.fillStyle = '#aba391';
-  ctx.fillRect(doorX - 3, doorY - 2, 26, 32);
-  ctx.fillRect(doorX - 1, doorY - 4, 22, 3);
+  // Puerta de roble con arco de cantería, herrajes forjados y escalón de piedra
+  drawDoorDeep(ctx, doorX + 1, doorY, 18, 30, {
+    frame: 'stone',
+    arch: true,
+    tone: 'oak',
+    steps: true,
+  });
+  // Dovela clave tallada sobre el arco y farolillo de hierro a su lado
   ctx.fillStyle = '#ded6c1';
-  ctx.fillRect(doorX, doorY - 4, 20, 1);
-  // Juntas radiales de las piedras del arco
-  ctx.fillStyle = 'rgba(46, 40, 32, 0.55)';
-  for (let sy = doorY + 3; sy < baseY - 3; sy += 6) {
-    ctx.fillRect(doorX - 3, sy, 4, 1);
-    ctx.fillRect(doorX + 19, sy, 4, 1);
-  }
-  ctx.fillRect(doorX + 9, doorY - 4, 1, 4);
-  // Hoja de puerta de tablones verticales de roble con herrajes de hierro y aldaba
-  ctx.fillStyle = '#301d10';
-  ctx.fillRect(doorX + 1, doorY, 18, 30);
-  ctx.fillStyle = '#6f4829';
-  ctx.fillRect(doorX + 2, doorY + 1, 16, 28);
-  ctx.fillStyle = '#8b5d36';
-  ctx.fillRect(doorX + 3, doorY + 2, 14, 2);
-  for (let px = doorX + 5; px < doorX + 17; px += 4) {
-    ctx.fillStyle = 'rgba(42, 24, 12, 0.55)';
-    ctx.fillRect(px, doorY + 2, 1, 27);
-  }
-  // Bisagras de forja y aldaba dorada
-  ctx.fillStyle = '#272a30';
-  ctx.fillRect(doorX + 2, doorY + 6, 8, 2);
-  ctx.fillRect(doorX + 2, doorY + 21, 8, 2);
-  ctx.fillStyle = '#e0ab2b';
-  ctx.fillRect(doorX + 14, doorY + 14, 3, 3);
-  ctx.fillStyle = '#fff3c4';
-  ctx.fillRect(doorX + 14, doorY + 14, 1, 1);
+  ctx.fillRect(doorX + 8, doorY - 9, 4, 2);
+  ctx.fillStyle = 'rgba(90, 82, 66, 0.6)';
+  ctx.fillRect(doorX + 8, doorY - 7, 4, 1);
 
-  // Ventana baja oriental con arco de piedra y luz cálida interior
+  // Ventana baja oriental con marco de piedra, postigos de madera y luz interior
   const winLowX = doorX + 29;
   const winLowY = baseY - 24;
-  ctx.fillStyle = '#aba391';
-  ctx.fillRect(winLowX - 2, winLowY - 2, 14, 15);
-  ctx.fillStyle = '#26170d';
-  ctx.fillRect(winLowX, winLowY, 10, 11);
-  ctx.fillStyle = `rgba(255, 196, 106, ${flicker.toFixed(2)})`;
-  ctx.fillRect(winLowX + 1, winLowY + 1, 8, 9);
-  ctx.fillStyle = '#3b2414';
-  ctx.fillRect(winLowX + 5, winLowY + 1, 1, 9);
-  ctx.fillRect(winLowX + 1, winLowY + 5, 8, 1);
+  drawWindowDeep(ctx, winLowX, winLowY, 10, 11, {
+    lit: true,
+    flicker,
+    frame: 'stone',
+    shutters: 'rose',
+    box: true,
+    boxColor: '#fdba74',
+  });
 
-  // Solera escalonada de piedra y tablones del porche que enlazan con el sendero
-  ctx.fillStyle = 'rgba(28, 20, 12, 0.38)';
-  ctx.fillRect(doorX - 5, baseY, 32, 5);
-  ctx.fillStyle = '#c49d6c';
-  ctx.fillRect(doorX - 4, baseY - 1, 30, 4);
-  ctx.fillStyle = 'rgba(255, 242, 214, 0.5)';
-  ctx.fillRect(doorX - 3, baseY - 1, 28, 1);
+  // Losa de piedra desgastada que enlaza el umbral con el sendero del claro
+  ctx.fillStyle = '#a9916d';
+  ctx.fillRect(doorX - 6, baseY + 2, 34, 4);
+  ctx.fillStyle = '#c9b18c';
+  ctx.fillRect(doorX - 5, baseY + 2, 32, 1);
+  ctx.fillStyle = 'rgba(120, 100, 72, 0.55)';
+  ctx.fillRect(doorX + 8, baseY + 3, 1, 3);
+  ctx.fillRect(doorX + 21, baseY + 3, 1, 3);
+  ctx.fillStyle = 'rgba(24, 18, 10, 0.28)';
+  ctx.fillRect(doorX - 6, baseY + 6, 34, 1);
 
   // Barril de madera sobre caballete y macetas junto al porche (inspirado en foto 4 y 5)
   const brX = eastBodyX + 4;
@@ -5633,147 +7071,130 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
     ctx.restore();
   }
 
-  // 7. CUBIERTAS DE TEJA Y PAJA EN L CON BUHARDILLA Y CHIMENEA DE PIEDRA
-  // 7a. Tejado principal este de teja terracota artesanal (escalonado fila por fila como foto 4 y 5)
-  const eastRoofTop = y - 10;
-  const eastRoofBottom = eastTimberTop + 3;
-  const eastRoofRows = Math.floor((eastRoofBottom - eastRoofTop) / 4);
-  for (let r = 0; r <= eastRoofRows; r++) {
-    const ry = eastRoofTop + r * 4;
-    const flare = Math.round((r / Math.max(1, eastRoofRows)) * 5);
-    const rx = eastBodyX - 4 - Math.round(flare * 0.4);
-    const rw = eastBodyW + 10 + flare;
-    ctx.fillStyle = '#381c12';
-    ctx.fillRect(rx, ry, rw, 5);
-    for (let tx = rx + 1, col = 0; tx < rx + rw - 2; tx += 5, col++) {
-      const th = hash2(tx + r * 7, ry);
-      const tileTone =
-        th > 0.72 ? '#cf683e' : th > 0.34 ? '#b8532f' : '#9c4124';
-      ctx.fillStyle = tileTone;
-      ctx.fillRect(tx, ry, 4, 4);
-      ctx.fillStyle = r < 3 || th > 0.6 ? 'rgba(255, 198, 146, 0.36)' : 'rgba(255, 178, 124, 0.20)';
-      ctx.fillRect(tx, ry, 3, 1);
-      ctx.fillStyle = 'rgba(54, 22, 12, 0.45)';
-      ctx.fillRect(tx, ry + 3, 4, 1);
-    }
-  }
-  // Cumbrera de madera tallada y remates del tejado este
-  ctx.fillStyle = '#472818';
-  ctx.fillRect(eastBodyX - 4, eastRoofTop - 3, eastBodyW + 10, 4);
-  ctx.fillStyle = '#8f5934';
-  ctx.fillRect(eastBodyX - 3, eastRoofTop - 2, eastBodyW + 8, 2);
-  ctx.fillStyle = 'rgba(255, 226, 172, 0.35)';
-  ctx.fillRect(eastBodyX - 2, eastRoofTop - 2, eastBodyW + 4, 1);
+  // 7. CUBIERTAS EN L: un gran faldón de paja dorada sobre el cuerpo
+  // principal y un tejadillo de teja árabe en el ala oeste. Aleros
+  // profundos, cabios vistos y buhardilla centrada sobre la puerta.
+  const roofSeed = hash2(x + 3, y - 5);
 
-  // Buhardilla central con tejadillo a dos aguas sobre el faldón este (como foto 5)
-  const dormCx = eastBodyX + 38;
-  const dormTop = eastRoofTop + 5;
-  const dormW = 22;
-  // Muro de la buhardilla
-  ctx.fillStyle = '#2d1a0e';
-  ctx.fillRect(dormCx - 8, dormTop + 8, 16, 13);
-  ctx.fillStyle = '#784e2d';
-  ctx.fillRect(dormCx - 7, dormTop + 9, 14, 11);
-  ctx.fillStyle = `rgba(255, 206, 122, ${(flicker * 0.9).toFixed(2)})`;
-  ctx.fillRect(dormCx - 4, dormTop + 11, 8, 7);
-  ctx.fillStyle = '#382112';
-  ctx.fillRect(dormCx, dormTop + 11, 1, 7);
-  ctx.fillRect(dormCx - 4, dormTop + 14, 8, 1);
-  // Tejadillo triangular escalonado de la buhardilla
-  for (let i = 0; i < 10; i++) {
-    const hw = 2 + Math.round((i / 9) * (dormW * 0.5));
-    ctx.fillStyle = i % 2 === 0 ? '#cc643b' : '#ad4b29';
-    ctx.fillRect(dormCx - hw, dormTop + i, hw * 2, 2);
-    ctx.fillStyle = '#422014';
-    ctx.fillRect(dormCx - hw - 1, dormTop + i + 1, 1, 2);
-    ctx.fillRect(dormCx + hw, dormTop + i + 1, 1, 2);
-  }
-  ctx.fillStyle = '#f2b885';
-  ctx.fillRect(dormCx - 1, dormTop, 2, 9);
+  // 7a. Faldón principal de paja sobre el cuerpo este.
+  drawThatchRoof(ctx, eastBodyX - 14, y - 26, eastBodyW + 34, 51, roofSeed);
+  drawRoofEaveDepth(ctx, eastBodyX - 14, y + 24, eastBodyW + 34, '#5c3b22', '#9c6a40', 12);
+  // El festón de paja cuelga por delante de la solera y las cabezas de cabio.
+  drawThatchFringe(ctx, eastBodyX - 18, y + 25, eastBodyW + 42, roofSeed);
+  ctx.fillStyle = 'rgba(18, 10, 6, 0.26)';
+  ctx.fillRect(eastBodyX - 4, y + 30, eastBodyW + 12, 2);
 
-  // 7b. Ala oeste transversal con hastial triangular de madera verde-grisácea y cubierta a dos aguas (como foto 6 y 7)
-  const gableCx = westWingX + Math.round(westWingW * 0.5); // x + 20
-  const gablePeakY = y - 16;
-  const gableEaveY = westTimberTop + 2;
-  const gableHalfW = Math.round(westWingW * 0.5) + 5; // 27 px
+  // 7b. Buhardilla de madera con capota de paja y ventana encendida,
+  // alineada con el eje de la puerta principal.
+  const dormerX = x + 76;
+  // Sombra proyectada del buhardillón sobre el faldón principal.
+  ctx.fillStyle = 'rgba(22, 13, 6, 0.22)';
+  ctx.beginPath();
+  ctx.moveTo(dormerX + 17, y + 4);
+  ctx.lineTo(dormerX + 26, y + 1);
+  ctx.lineTo(dormerX + 26, y + 26);
+  ctx.lineTo(dormerX + 17, y + 28);
+  ctx.closePath();
+  ctx.fill();
+  // Caja de tablones con solera y listones.
+  ctx.fillStyle = '#2c1a0e';
+  ctx.fillRect(dormerX - 17, y + 2, 34, 22);
+  ctx.fillStyle = '#6f4829';
+  ctx.fillRect(dormerX - 16, y + 3, 32, 20);
+  for (let px = dormerX - 13; px < dormerX + 14; px += 4) {
+    ctx.fillStyle = px === dormerX - 13 ? 'rgba(180, 125, 74, 0.4)' : 'rgba(40, 24, 12, 0.5)';
+    ctx.fillRect(px, y + 4, 1, 18);
+  }
+  ctx.fillStyle = '#3a2313';
+  ctx.fillRect(dormerX - 18, y + 1, 36, 3);
+  ctx.fillStyle = '#b4834b';
+  ctx.fillRect(dormerX - 17, y + 1, 34, 1);
+  ctx.fillStyle = 'rgba(18, 10, 6, 0.34)';
+  ctx.fillRect(dormerX - 16, y + 3, 32, 2);
+  // Ventana iluminada con jardinera de flores.
+  drawWindowDeep(ctx, dormerX - 6, y + 7, 12, 12, {
+    lit: true,
+    flicker,
+    frame: 'wood',
+    box: true,
+    boxColor: '#f9a8d4',
+  });
+  // Capota de paja a dos aguas con alero festoneado.
+  drawThatchRoof(ctx, dormerX - 18, y - 10, 36, 13, roofSeed + 4);
+  ctx.fillStyle = 'rgba(18, 10, 6, 0.12)';
+  ctx.fillRect(dormerX - 20, y + 2, 40, 2);
 
-  // Tímpano triangular de tablones verticales bajo el alero del hastial
-  for (let gy = gablePeakY + 7; gy < gableEaveY; gy++) {
-    const t = (gy - (gablePeakY + 7)) / Math.max(1, gableEaveY - (gablePeakY + 7));
-    const hw = Math.max(2, Math.round(t * (gableHalfW - 4)));
-    ctx.fillStyle = '#7d806b';
-    ctx.fillRect(gableCx - hw, gy, hw * 2, 1);
+  // 7c. Ala oeste: tejadillo de teja árabe adosado, más bajo que la paja,
+  // con lima de encuentro sombreada y ventilación de pajar.
+  drawClayTileRoof(ctx, westWingX - 10, y - 6, westWingW + 24, 40, roofSeed + 9);
+  drawRoofEaveDepth(ctx, westWingX - 10, y + 32, westWingW + 24, '#6e4728', '#a9794c', 11);
+  ctx.fillStyle = 'rgba(26, 14, 8, 0.3)';
+  ctx.fillRect(westWingX - 8, y + 36, westWingW + 20, 2);
+  // Ventanuco de ventilación del pajar bajo la cumbrera del ala.
+  ctx.fillStyle = '#2b190d';
+  ctx.fillRect(westWingX + 15, y + 7, 14, 10);
+  ctx.fillStyle = '#7d5432';
+  ctx.fillRect(westWingX + 16, y + 8, 12, 8);
+  for (let vx = westWingX + 17; vx < westWingX + 27; vx += 3) {
+    ctx.fillStyle = 'rgba(38, 22, 10, 0.6)';
+    ctx.fillRect(vx, y + 8, 1, 8);
   }
-  for (let px = gableCx - gableHalfW + 5; px < gableCx + gableHalfW - 4; px += 4) {
-    const dist = Math.abs(px - gableCx);
-    const topY = Math.round(gablePeakY + 8 + (dist / (gableHalfW - 4)) * (gableEaveY - gablePeakY - 8));
-    if (topY < gableEaveY) {
-      ctx.fillStyle = 'rgba(38, 42, 32, 0.48)';
-      ctx.fillRect(px, topY, 1, gableEaveY - topY);
-    }
-  }
-  // Ventanuco romboidal de desván en el centro del hastial
-  ctx.fillStyle = '#23170e';
-  ctx.fillRect(gableCx - 2, gableEaveY - 12, 5, 5);
-  ctx.fillStyle = '#fbbf24';
-  ctx.fillRect(gableCx - 1, gableEaveY - 11, 3, 3);
+  ctx.fillStyle = '#1f2229';
+  ctx.fillRect(westWingX + 21, y + 5, 3, 2);
+  ctx.fillStyle = '#c9a05a';
+  ctx.fillRect(westWingX + 22, y + 5, 1, 1);
+  // Sombra de la lima donde se encuentran ambos faldones.
+  ctx.fillStyle = 'rgba(24, 14, 8, 0.36)';
+  ctx.fillRect(westWingX + westWingW + 8, y + 2, 3, 30);
 
-  // Faldón izquierdo iluminado por el sol del oeste y faldón derecho con sombra sobre el encuentro en L
-  for (let i = 0; i <= gableEaveY - gablePeakY; i++) {
-    const t = i / Math.max(1, gableEaveY - gablePeakY);
-    const span = Math.round(3 + t * gableHalfW);
-    const ry = gablePeakY + i;
-    // Sombra proyectada sobre el tejado este
-    ctx.fillStyle = 'rgba(28, 14, 10, 0.28)';
-    ctx.fillRect(gableCx + span, ry + 2, 4, 2);
-    // Borde exterior de vigas cabrias
-    ctx.fillStyle = '#3b2014';
-    ctx.fillRect(gableCx - span - 1, ry, 4, 3);
-    ctx.fillRect(gableCx + span - 3, ry, 4, 3);
-    // Tejas soleadas al oeste y más profundas al este
-    if (i < 7) {
-      ctx.fillStyle = i % 3 === 0 ? '#dc7648' : '#bd5732';
-      ctx.fillRect(gableCx - span + 1, ry, span * 2 - 2, 2);
-    } else {
-      ctx.fillStyle = '#e07b4c';
-      ctx.fillRect(gableCx - span + 1, ry - 2, 5, 3);
-      ctx.fillStyle = '#a84726';
-      ctx.fillRect(gableCx + span - 6, ry - 2, 5, 3);
-    }
-  }
-  // Remate central de madera en la cumbrera del ala oeste
-  ctx.fillStyle = '#4a2b18';
-  ctx.fillRect(gableCx - 2, gablePeakY - 3, 5, 11);
-  ctx.fillStyle = '#a67144';
-  ctx.fillRect(gableCx - 1, gablePeakY - 2, 2, 9);
+  // 7d. Chimenea de sillares junto a la cumbrera oriental con humo suave.
+  // Sombra arrojada sobre el faldón para asentarla en el tejado.
+  ctx.fillStyle = 'rgba(30, 19, 8, 0.24)';
+  ctx.beginPath();
+  ctx.moveTo(eastBodyX + 73, y - 30);
+  ctx.lineTo(eastBodyX + 82, y - 27);
+  ctx.lineTo(eastBodyX + 84, y - 10);
+  ctx.lineTo(eastBodyX + 75, y - 13);
+  ctx.closePath();
+  ctx.fill();
+  drawStoneChimney(
+    ctx,
+    eastBodyX + 60,
+    y - 38,
+    14,
+    26,
+    roofSeed + 1,
+    elapsed,
+    reducedMotion,
+    true
+  );
 
-  // 8. Chimenea robusta de sillares de piedra con humo suave en la cumbrera
-  const chimX = eastBodyX + 10;
-  const chimY = eastRoofTop - 13;
-  ctx.fillStyle = '#2d2d2a';
-  ctx.fillRect(chimX - 1, chimY, 15, 18);
-  ctx.fillStyle = '#6f7368';
-  ctx.fillRect(chimX, chimY + 1, 13, 16);
-  ctx.fillStyle = '#969a8d';
-  ctx.fillRect(chimX, chimY, 13, 3);
-  ctx.fillStyle = '#464942';
-  ctx.fillRect(chimX + 2, chimY + 1, 9, 2);
-  ctx.fillRect(chimX, chimY + 7, 13, 1);
-  ctx.fillRect(chimX, chimY + 12, 13, 1);
-  ctx.fillRect(chimX + 6, chimY + 3, 1, 9);
-  ctx.fillStyle = 'rgba(244, 238, 218, 0.35)';
-  ctx.fillRect(chimX, chimY, 10, 1);
-  if (!reducedMotion) {
-    for (let i = 0; i < 6; i++) {
-      const st = (elapsed * 0.26 + i / 6) % 1;
-      const alpha = 0.28 * (1 - st);
-      ctx.fillStyle = `rgba(232, 238, 244, ${alpha.toFixed(3)})`;
-      const sx = chimX + 6 + Math.sin(st * 7 + i) * 8;
-      const sy = chimY - 4 - st * 40;
-      const size = 2 + Math.round(st * 5);
-      ctx.fillRect(Math.round(sx), Math.round(sy), size, size - 1);
-    }
-  }
+
+  // Banco rústico bajo las ventanas del ala oeste, con sombra de contacto.
+  ctx.fillStyle = 'rgba(12, 16, 10, 0.32)';
+  ctx.fillRect(618, baseY - 1, 19, 3);
+  ctx.fillStyle = '#2b1a0e';
+  ctx.fillRect(619, baseY - 12, 3, 11);
+  ctx.fillRect(633, baseY - 12, 3, 11);
+  ctx.fillStyle = '#3b2414';
+  ctx.fillRect(618, baseY - 16, 19, 4);
+  ctx.fillStyle = '#8a5d34';
+  ctx.fillRect(619, baseY - 15, 17, 2);
+  ctx.fillStyle = '#c08a52';
+  ctx.fillRect(619, baseY - 15, 15, 1);
+  ctx.fillStyle = 'rgba(28, 16, 8, 0.5)';
+  ctx.fillRect(619, baseY - 13, 17, 1);
+  ctx.fillStyle = '#3b2414';
+  ctx.fillRect(620, baseY - 24, 2, 9);
+  ctx.fillRect(633, baseY - 24, 2, 9);
+  ctx.fillStyle = '#7c512f';
+  ctx.fillRect(621, baseY - 22, 13, 2);
+  ctx.fillStyle = '#a9794c';
+  ctx.fillRect(621, baseY - 22, 13, 1);
+  // Nudo y veta del respaldo.
+  ctx.fillStyle = 'rgba(52, 32, 16, 0.6)';
+  ctx.fillRect(627, baseY - 22, 2, 1);
+  ctx.fillRect(622, baseY - 16, 1, 2);
 
   // Enredadera y matas floridas que trepan desde la base para fundir los muros con la pradera
   const ivySpots = [eastBodyX + 2, eastBodyX + 39, woodshedX - 2, westWingX + westWingW - 4];
@@ -5809,6 +7230,84 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
       ctx.fillRect(bx - 1, baseY - 5, 4, 3);
     }
   }
+
+  // Jardineras del umbral: dos composiciones a los costados del sendero, con
+  // maceta de barro al oeste y cajón de madera al este. Dejan libre la calzada
+  // y enmarcan la puerta sin ocultar el escalón ni el rótulo.
+  const planterY = baseY + 15;
+  // Sombra de contacto compartida.
+  ctx.fillStyle = 'rgba(10, 16, 10, 0.34)';
+  ctx.fillRect(640, planterY - 2, 12, 4);
+  ctx.fillRect(693, planterY - 3, 14, 4);
+
+  // Maceta de terracota (oeste).
+  ctx.fillStyle = '#6f3a24';
+  ctx.fillRect(641, planterY - 8, 10, 3);
+  ctx.fillStyle = '#c4794f';
+  ctx.fillRect(642, planterY - 8, 8, 2);
+  ctx.fillStyle = '#e2a377';
+  ctx.fillRect(642, planterY - 8, 6, 1);
+  ctx.fillStyle = '#a85c3c';
+  ctx.fillRect(642, planterY - 6, 8, 6);
+  ctx.fillStyle = '#7d3f28';
+  ctx.fillRect(648, planterY - 6, 2, 6);
+  ctx.fillStyle = '#914a2f';
+  ctx.fillRect(642, planterY - 1, 8, 1);
+  // Mata florida: hojas en capas y tres flores.
+  ctx.fillStyle = '#2f6b35';
+  ctx.fillRect(644, planterY - 13, 2, 6);
+  ctx.fillRect(647, planterY - 12, 2, 5);
+  ctx.fillStyle = '#4f9a45';
+  ctx.fillRect(643, planterY - 12, 2, 4);
+  ctx.fillRect(646, planterY - 14, 2, 6);
+  ctx.fillStyle = '#7fcb66';
+  ctx.fillRect(644, planterY - 13, 1, 3);
+  ctx.fillRect(647, planterY - 14, 1, 3);
+  ctx.fillStyle = '#f9a8d4';
+  ctx.fillRect(643, planterY - 16, 2, 2);
+  ctx.fillStyle = '#fde68a';
+  ctx.fillRect(647, planterY - 16, 2, 2);
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(645, planterY - 15, 1, 1);
+
+  // Cajón jardinera de madera (este).
+  ctx.fillStyle = '#3b2414';
+  ctx.fillRect(693, planterY - 9, 14, 8);
+  ctx.fillStyle = '#7c512f';
+  ctx.fillRect(694, planterY - 8, 12, 6);
+  ctx.fillStyle = '#9c6a40';
+  ctx.fillRect(694, planterY - 8, 12, 2);
+  ctx.fillStyle = '#5e3b22';
+  ctx.fillRect(694, planterY - 4, 12, 1);
+  ctx.fillStyle = '#2b190d';
+  ctx.fillRect(696, planterY - 3, 1, 2);
+  ctx.fillRect(704, planterY - 3, 1, 2);
+  // Helecho bajo y flores blancas.
+  ctx.fillStyle = '#245a2b';
+  ctx.fillRect(695, planterY - 13, 2, 5);
+  ctx.fillRect(699, planterY - 14, 2, 6);
+  ctx.fillRect(703, planterY - 12, 2, 4);
+  ctx.fillStyle = '#4f9a45';
+  ctx.fillRect(695, planterY - 12, 1, 3);
+  ctx.fillRect(699, planterY - 13, 1, 4);
+  ctx.fillStyle = '#8dd07a';
+  ctx.fillRect(700, planterY - 15, 1, 1);
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(697, planterY - 15, 2, 2);
+  ctx.fillStyle = '#fde68a';
+  ctx.fillRect(702, planterY - 15, 2, 2);
+  // Piedras de borde y matas bajas que unen las jardineras con la pradera.
+  ctx.fillStyle = '#8b8f98';
+  ctx.fillRect(652, planterY - 3, 3, 2);
+  ctx.fillStyle = '#b9bcc4';
+  ctx.fillRect(652, planterY - 3, 2, 1);
+  ctx.fillStyle = '#3d7c3c';
+  ctx.fillRect(639, planterY - 4, 1, 4);
+  ctx.fillRect(641, planterY - 3, 1, 3);
+  ctx.fillRect(707, planterY - 4, 1, 4);
+  ctx.fillStyle = '#74c161';
+  ctx.fillRect(640, planterY - 5, 1, 2);
+  ctx.fillRect(708, planterY - 5, 1, 2);
 }
 
 function drawShed(
@@ -5826,13 +7325,8 @@ function drawShed(
   const lit = arcadeState !== 'dusty';
   const woodTiles = ensureNatalWoodTiles();
 
-  // 1. Sombra de Oclusión Ambiental Profunda y Contact Shadow en la base
-  ctx.fillStyle = 'rgba(6, 12, 8, 0.58)';
-  ctx.beginPath();
-  ctx.ellipse(x + w * 0.52 + 6, baseY + 3, w * 0.56 + 12, 12, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = 'rgba(2, 6, 4, 0.72)';
-  ctx.fillRect(x - 8, baseY - 2, w + 20, 4);
+  // 1. Sombra de contacto y proyección sobre la pradera.
+  drawHouseGroundShadow(ctx, x, baseY, w);
 
   // 3. Conexión de Caminos en las Puertas (Access Trails)
   // Extensión de tierra batida, barro y empedrado desde la entrada del porche hacia la plaza del arcade
@@ -5934,12 +7428,35 @@ function drawShed(
       const th = hash2(px + 7, py - 11);
       ctx.fillStyle = th > 0.6 ? '#6b7364' : th > 0.3 ? '#555d50' : '#454c41';
       ctx.fillRect(px, py, 9, 5);
+      ctx.fillStyle = 'rgba(196, 206, 186, 0.2)';
+      ctx.fillRect(px, py, 7, 1);
+      if (th > 0.52) {
+        ctx.fillStyle = 'rgba(26, 30, 22, 0.28)';
+        ctx.fillRect(px + 2 + Math.floor(th * 5), py + 2, 1, 1);
+      }
       if (th < 0.34) {
         ctx.fillStyle = 'rgba(78, 128, 58, 0.52)';
         ctx.fillRect(px + 1, py + 2, 5, 2);
       }
     }
   }
+  // Sillares esquineros del zócalo y rosal trepador junto a la ventana del taller.
+  drawStoneQuoins(
+    ctx,
+    x,
+    lodgeStoneTop,
+    lodgeW,
+    baseY - lodgeStoneTop - 1,
+    '#3f443c',
+    '#6b7364',
+    '#b9c1ac'
+  );
+  for (let i = 0; i < 3; i += 1) {
+    const sx = x + 6 + Math.floor(hash2(i * 19 + x, y + 7) * (lodgeW - 12));
+    ctx.fillStyle = 'rgba(46, 58, 42, 0.16)';
+    ctx.fillRect(sx, lodgeStoneTop + 4, 1, baseY - lodgeStoneTop - 8);
+  }
+  drawClimbingRose(ctx, x + 2, y + 50, baseY - 14, 9, '#fb7185');
   // Muro de troncos del cuerpo oeste
   const lodgeWallTop = y + 36;
   const lodgeWallH = lodgeStoneTop - lodgeWallTop;
@@ -5968,19 +7485,18 @@ function drawShed(
       ctx.fillRect(cx + 1, py + 1, 3, 3);
     }
   }
-  // Ventana del taller con postigos verdes y resplandor ámbar/cian
+  // Ventana del taller con postigos verdes, reflejo y jardinera.
   const swinX = x + 17;
   const swinY = lodgeWallTop + 13;
-  ctx.fillStyle = '#23140b';
-  ctx.fillRect(swinX - 2, swinY - 2, 20, 19);
-  ctx.fillStyle = '#2d4f43';
-  ctx.fillRect(swinX - 6, swinY - 1, 4, 17);
-  ctx.fillRect(swinX + 18, swinY - 1, 4, 17);
-  ctx.fillStyle = lit ? 'rgba(130, 236, 245, 0.78)' : 'rgba(232, 184, 106, 0.55)';
-  ctx.fillRect(swinX, swinY, 16, 15);
-  ctx.fillStyle = '#3b2414';
-  ctx.fillRect(swinX + 7, swinY, 2, 15);
-  ctx.fillRect(swinX, swinY + 7, 16, 2);
+  drawWindowDeep(ctx, swinX, swinY, 16, 15, {
+    lit,
+    flicker: lit ? 0.82 : 0.4,
+    frame: 'wood',
+    shutters: 'green',
+    box: true,
+    boxColor: '#67e8f9',
+    tint: 'cool',
+  });
   // Mesa de carpintero y cajones junto al cuerpo oeste
   ctx.fillStyle = '#5c3d22';
   ctx.fillRect(x + 8, baseY - 18, 34, 16);
@@ -6008,9 +7524,39 @@ function drawShed(
     ctx.fillRect(postX + 1, y + 26, 3, h - 26);
     ctx.fillStyle = '#a47247';
     ctx.fillRect(postX + 1, y + 26, 1, h - 28);
-    ctx.fillStyle = '#484d46';
-    ctx.fillRect(postX - 1, baseY - 5, 9, 5);
+    // Tornapunta diagonal hacia la viga frontal.
+    const inward = postX === porchX + 1 ? 1 : -1;
+    ctx.fillStyle = '#3a2414';
+    ctx.fillRect(postX + (inward > 0 ? 2 : -7), y + 32, 7, 2);
+    ctx.fillRect(postX + (inward > 0 ? 7 : -10), y + 34, 7, 2);
+    ctx.fillRect(postX + (inward > 0 ? 12 : -13), y + 36, 8, 2);
+    ctx.fillStyle = '#8a5d34';
+    ctx.fillRect(postX + (inward > 0 ? 3 : -6), y + 32, 5, 1);
+    // Zócalo de piedra biselado bajo el poste.
+    ctx.fillStyle = '#3a3d38';
+    ctx.fillRect(postX - 2, baseY - 7, 11, 7);
+    ctx.fillStyle = '#6f7368';
+    ctx.fillRect(postX - 1, baseY - 6, 9, 5);
+    ctx.fillStyle = '#9a9d8e';
+    ctx.fillRect(postX - 1, baseY - 6, 7, 1);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.fillRect(postX - 1, baseY - 2, 9, 1);
   }
+  // Herramientas y soga colgadas de los postes del taller.
+  ctx.fillStyle = '#8a5d34';
+  ctx.fillRect(porchX + 3, y + 44, 2, 8);
+  ctx.fillStyle = '#9aa0a6';
+  ctx.fillRect(porchX + 1, y + 41, 6, 3);
+  ctx.fillStyle = '#cbd5e1';
+  ctx.fillRect(porchX + 2, y + 41, 3, 1);
+  ctx.strokeStyle = '#8a7448';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(x + w - 5, y + 44, 4, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x + w - 5, y + 44, 2.5, 0, Math.PI * 2);
+  ctx.stroke();
   // Viga frontal del porche y bombilla colgante
   ctx.fillStyle = '#382213';
   ctx.fillRect(porchX, y + 24, porchW + 2, 6);
@@ -6032,77 +7578,135 @@ function drawShed(
     ctx.restore();
   }
 
-  // 5. CUBIERTAS VERDE BOSQUE DE TEJAMANIL ESCALONADO (inspiradas en la foto 7)
-  // 5a. Faldón horizontal sobre el porche-taller oriental
-  const porchRoofTop = y - 2;
-  const porchRoofBottom = y + 26;
-  const pRows = Math.floor((porchRoofBottom - porchRoofTop) / 4);
-  for (let r = 0; r <= pRows; r++) {
-    const ry = porchRoofTop + r * 4;
-    const rx = porchX - 2;
-    const rw = porchW + 8;
-    ctx.fillStyle = '#14261c';
-    ctx.fillRect(rx, ry, rw, 5);
-    for (let tx = rx + 1; tx < rx + rw - 2; tx += 5) {
-      const th = hash2(tx + r * 13, ry - 5);
-      ctx.fillStyle = th > 0.66 ? '#3a6b4c' : th > 0.3 ? '#2c563c' : '#21442f';
-      ctx.fillRect(tx, ry, 4, 4);
-      ctx.fillStyle = 'rgba(158, 214, 168, 0.24)';
-      ctx.fillRect(tx, ry, 3, 1);
-    }
+  // 5. CUBIERTA DE TEJAMANIL VERDE BOSQUE CON HASTIAL ENTRAMADO
+  // El taller adopta la silueta de las casas de referencia: faldones con
+  // escamas, hastial de estuco y roble, canalón de cobre y cabios vistos.
+  const shedRoofSeed = hash2(x - 4, y + 9);
+
+  // 5a. Faldón del porche-taller, canalón y bajante.
+  drawShingleRoof(ctx, porchX - 8, y - 6, porchW + 20, 27, shedRoofSeed);
+  drawRoofEaveDepth(ctx, porchX - 8, y + 21, porchW + 20, '#3f2817', '#8a5d34', 13);
+  ctx.fillStyle = '#5b4a32';
+  ctx.fillRect(porchX - 7, y + 24, porchW + 18, 2);
+  ctx.fillStyle = '#9a7a4c';
+  ctx.fillRect(porchX - 7, y + 24, porchW + 18, 1);
+  for (let gx = porchX - 3; gx < porchX + porchW + 9; gx += 16) {
+    ctx.fillStyle = '#3a2c1c';
+    ctx.fillRect(gx, y + 23, 2, 3);
   }
-  ctx.fillStyle = '#3b2414';
-  ctx.fillRect(porchX - 2, porchRoofTop - 2, porchW + 7, 3);
-  // Festón tallado de madera clara bajo el alero del porche (guiño a la foto 7)
-  ctx.fillStyle = '#cbb793';
-  for (let sx = porchX + 2; sx < porchX + porchW + 2; sx += 4) {
-    ctx.fillRect(sx, porchRoofBottom, 2, 2);
+  ctx.fillStyle = '#5b4a32';
+  ctx.fillRect(x + w + 7, y + 16, 3, baseY - (y + 16) - 8);
+  ctx.fillStyle = '#8a6b42';
+  ctx.fillRect(x + w + 7, y + 16, 1, baseY - (y + 16) - 8);
+  ctx.fillStyle = '#2f2418';
+  ctx.fillRect(x + w + 6, y + 14, 5, 3);
+  // Festón tallado bajo el alero del porche.
+  for (let sx = porchX - 6; sx < porchX + porchW + 10; sx += 5) {
+    ctx.fillStyle = '#cbb793';
+    ctx.fillRect(sx, y + 24, 3, 2);
+    ctx.fillStyle = 'rgba(48, 32, 18, 0.45)';
+    ctx.fillRect(sx, y + 26, 3, 1);
   }
 
-  // 5b. Gran hastial agudo oeste con tejamanil verde bosque y moldura de madera
-  const sGableCx = x + Math.round(lodgeW * 0.5);
-  const sPeakY = y - 14;
-  const sEaveY = lodgeWallTop + 2;
-  const sHalfW = Math.round(lodgeW * 0.5) + 6;
-  for (let gy = sPeakY + 7; gy < sEaveY; gy++) {
-    const t = (gy - (sPeakY + 7)) / Math.max(1, sEaveY - (sPeakY + 7));
-    const hw = Math.max(2, Math.round(t * (sHalfW - 4)));
-    ctx.fillStyle = '#9b8c72';
-    ctx.fillRect(sGableCx - hw, gy, hw * 2, 1);
-  }
-  // Ventana geminada de buhardilla en el hastial del taller (como foto 7)
-  ctx.fillStyle = '#23160d';
-  ctx.fillRect(sGableCx - 6, sEaveY - 16, 12, 10);
-  ctx.fillStyle = '#cbb793';
-  ctx.fillRect(sGableCx - 5, sEaveY - 15, 10, 8);
-  ctx.fillStyle = '#283834';
-  ctx.fillRect(sGableCx - 4, sEaveY - 14, 3, 6);
-  ctx.fillRect(sGableCx + 1, sEaveY - 14, 3, 6);
+  // 5b. Faldones del cuerpo cerrado oeste.
+  drawShingleRoof(ctx, x - 16, y - 28, 48, 60, shedRoofSeed + 7);
+  drawShingleRoof(ctx, x + 30, y - 28, 34, 60, shedRoofSeed + 11);
+  drawRoofEaveDepth(ctx, x - 16, y + 31, 80, '#3f2817', '#8a5d34', 12);
 
-  for (let i = 0; i <= sEaveY - sPeakY; i++) {
-    const t = i / Math.max(1, sEaveY - sPeakY);
-    const span = Math.round(3 + t * sHalfW);
-    const ry = sPeakY + i;
-    ctx.fillStyle = 'rgba(10, 20, 14, 0.32)';
-    ctx.fillRect(sGableCx + span, ry + 2, 4, 2);
-    ctx.fillStyle = '#182e22';
-    ctx.fillRect(sGableCx - span - 1, ry, 5, 3);
-    ctx.fillRect(sGableCx + span - 4, ry, 5, 3);
-    ctx.fillStyle = i % 2 === 0 ? '#3f7352' : '#2d593e';
-    ctx.fillRect(sGableCx - span + 1, ry, 4, 2);
-    ctx.fillStyle = '#234731';
-    ctx.fillRect(sGableCx + span - 4, ry, 3, 2);
-    // Moldura clara festoneada bajo las vigas del hastial
-    if (i > 5 && i % 3 === 0) {
-      ctx.fillStyle = '#d4c3a3';
-      ctx.fillRect(sGableCx - span + 3, ry + 2, 2, 1);
-      ctx.fillRect(sGableCx + span - 5, ry + 2, 2, 1);
-    }
+  // Escamas descoloridas, hongos de humedad y hojas secas sobre el tejamanil.
+  for (let i = 0; i < 16; i += 1) {
+    const sx = x - 12 + Math.floor(hash2(shedRoofSeed + i * 11, y + i) * 82);
+    const sy = y - 24 + Math.floor(hash2(x + i * 5, shedRoofSeed + i) * 52);
+    ctx.fillStyle =
+      i % 3 === 0
+        ? 'rgba(170, 208, 180, 0.16)'
+        : i % 3 === 1
+          ? 'rgba(10, 28, 20, 0.22)'
+          : 'rgba(108, 150, 86, 0.28)';
+    ctx.fillRect(sx, sy, 3 + (i % 3), 2);
   }
-  // Musgo silvestre sobre las tejas del bosque
+  for (let i = 0; i < 6; i += 1) {
+    const sx = porchX - 2 + Math.floor(hash2(shedRoofSeed + i * 7, x) * (porchW + 6));
+    const sy = y - 2 + Math.floor(hash2(y + i, porchX) * 18);
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(176, 118, 52, 0.5)' : 'rgba(132, 86, 36, 0.45)';
+    ctx.fillRect(sx, sy, 2, 1);
+  }
+
+  // 5c. Hastial de estuco cálido con entramado de roble y ventana de desván.
+  drawGableFace(ctx, x + 27, y - 8, y + 34, 33, shedRoofSeed + 3, 'tudor', lit);
+  // Jardinera con flores bajo la ventana del hastial, como en las casas de referencia.
+  drawWindowPlanter(ctx, x + 18, y + 22, 18, '#fb7185');
+  ctx.fillStyle = 'rgba(12, 22, 16, 0.28)';
+  ctx.fillRect(x - 8, y + 36, 68, 2);
+
+  // 5d. Chimenea de piedra y humo sobre la cumbrera del taller.
+  drawStoneChimney(
+    ctx,
+    x + 8,
+    y - 50,
+    11,
+    26,
+    shedRoofSeed + 5,
+    elapsed,
+    reducedMotion,
+    true
+  );
+
+  // 5e. Peldaño de piedra y zócalo del porche-taller.
+  ctx.fillStyle = 'rgba(10, 16, 10, 0.34)';
+  ctx.fillRect(porchX + 14, baseY - 1, porchW - 20, 3);
+  ctx.fillStyle = '#8a7458';
+  ctx.fillRect(porchX + 16, baseY - 1, porchW - 24, 3);
+  ctx.fillStyle = '#c2ab8b';
+  ctx.fillRect(porchX + 16, baseY - 1, porchW - 24, 1);
+  ctx.fillStyle = '#6d5a42';
+  ctx.fillRect(porchX + 12, baseY, porchW - 16, 2);
+
+  // 5e. Musgo, hiedra y líquenes que funden la cubierta con la arboleda.
   ctx.fillStyle = 'rgba(116, 178, 78, 0.45)';
-  ctx.fillRect(porchX + 18, porchRoofTop + 6, 9, 2);
-  ctx.fillRect(porchX + 56, porchRoofTop + 14, 11, 2);
+  ctx.fillRect(porchX + 14, y + 4, 9, 2);
+  ctx.fillRect(porchX + 54, y + 13, 11, 2);
+  ctx.fillStyle = 'rgba(74, 128, 58, 0.55)';
+  ctx.fillRect(x + 20, y - 2, 7, 2);
+  ctx.fillRect(x + 38, y + 8, 5, 2);
+  for (let vx = 0; vx < 3; vx += 1) {
+    const vX = x + 62 + vx * 6;
+    const vY = y + 2 + vx * 5;
+    ctx.fillStyle = 'rgba(58, 112, 52, 0.7)';
+    ctx.fillRect(vX, vY, 2, 5 + vx * 2);
+    ctx.fillStyle = 'rgba(112, 168, 82, 0.7)';
+    ctx.fillRect(vX, vY, 1, 3);
+  }
+
+  // 5f. Letrero de taller colgado del poste oriental.
+  const shopSignX = x + w - 20;
+  const shopSignY = y + 30;
+  ctx.fillStyle = '#3b2414';
+  ctx.fillRect(shopSignX + 3, shopSignY - 4, 2, 6);
+  ctx.fillStyle = '#2b190d';
+  ctx.fillRect(shopSignX, shopSignY + 2, 13, 10);
+  ctx.fillStyle = '#b4834b';
+  ctx.fillRect(shopSignX + 1, shopSignY + 3, 11, 8);
+  ctx.fillStyle = '#d8ab72';
+  ctx.fillRect(shopSignX + 1, shopSignY + 3, 11, 1);
+  ctx.fillStyle = '#2c1a0d';
+  ctx.fillRect(shopSignX + 3, shopSignY + 5, 2, 4);
+  ctx.fillRect(shopSignX + 7, shopSignY + 5, 3, 3);
+  ctx.fillStyle = '#5c3b22';
+  ctx.fillRect(shopSignX + 5, shopSignY + 9, 1, 1);
+
+  // 5g. Utilería de taller en la base del porche.
+  drawCrateProp(ctx, x + w - 14, baseY - 1, 12);
+  drawBarrelProp(ctx, x + 42, baseY - 1, 0.9);
+  ctx.fillStyle = '#4a2e1a';
+  ctx.fillRect(x + 4, baseY - 10, 12, 9);
+  ctx.fillStyle = '#8a5d34';
+  ctx.fillRect(x + 4, baseY - 10, 3, 9);
+  ctx.fillStyle = '#c79a34';
+  ctx.fillRect(x + 8, baseY - 9, 3, 2);
+  ctx.fillStyle = '#3b2414';
+  ctx.fillRect(x + 9, baseY - 7, 2, 6);
+
 
   // 2. Vegetación Superpuesta en la Base (Blending con el Pasto)
   // Mechones de césped y briznas de hierba que crecen por encima de los píxeles más bajos del cobertizo
@@ -6639,24 +8243,74 @@ function drawPaddleItem(ctx: CanvasRenderingContext2D, elapsed: number, reducedM
   const y = CABINET_POS.y + 76;
   const bob = reducedMotion ? 0 : Math.sin(elapsed * 2.4) * 1.6;
 
+  // Halo de objeto recogible.
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  const g = ctx.createRadialGradient(x, y - 10 + bob, 1, x, y - 10 + bob, 34);
-  g.addColorStop(0, 'rgba(255,255,255,0.4)');
+  const g = ctx.createRadialGradient(x, y - 12 + bob, 1, x, y - 12 + bob, 36);
+  g.addColorStop(0, 'rgba(255,255,255,0.42)');
   g.addColorStop(0.4, 'rgba(0,243,255,0.22)');
   g.addColorStop(1, 'rgba(0,243,255,0)');
   ctx.fillStyle = g;
-  ctx.fillRect(x - 36, y - 46 + bob, 72, 72);
+  ctx.fillRect(x - 38, y - 48 + bob, 76, 76);
   ctx.restore();
 
+  // Sombra de contacto sobre el suelo de la arboleda.
+  ctx.fillStyle = 'rgba(6, 18, 20, 0.32)';
+  ctx.beginPath();
+  ctx.ellipse(x, y + 5, 11, 3.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Hoja de la barra: blanca con canto cian, volumen y brillo de arista.
+  const bladeTop = y - 33 + bob;
+  ctx.fillStyle = '#8fd8dc';
+  ctx.fillRect(x - 6, bladeTop, 12, 24);
   ctx.fillStyle = '#f8fafc';
-  ctx.fillRect(x - 3, y - 26 + bob, 7, 22);
+  ctx.fillRect(x - 5, bladeTop + 1, 10, 22);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x - 4, bladeTop + 2, 4, 20);
   ctx.fillStyle = '#cbd5e1';
-  ctx.fillRect(x - 3, y - 26 + bob, 2, 22);
+  ctx.fillRect(x + 2, bladeTop + 2, 3, 20);
   ctx.fillStyle = '#e2e8f0';
-  ctx.fillRect(x - 1, y - 4 + bob, 3, 8);
+  ctx.fillRect(x - 5, bladeTop + 1, 10, 1);
+  // Banda cian del emblema Pong.
   ctx.fillStyle = '#00f3ff';
-  ctx.fillRect(x + 4, y - 20 + bob, 2, 12);
+  ctx.fillRect(x - 5, bladeTop + 8, 10, 2);
+  ctx.fillRect(x - 3, bladeTop + 8, 2, 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.fillRect(x - 4, bladeTop + 12, 2, 8);
+  // Golpes de uso en el canto.
+  ctx.fillStyle = 'rgba(120, 150, 160, 0.35)';
+  ctx.fillRect(x + 3, bladeTop + 18, 1, 2);
+  ctx.fillRect(x - 5, bladeTop + 5, 1, 1);
+
+  // Mango con empuñadura de cuero y remate metálico.
+  ctx.fillStyle = '#1f6d72';
+  ctx.fillRect(x - 2, bladeTop + 24, 4, 9);
+  ctx.fillStyle = '#e8eef2';
+  ctx.fillRect(x - 1, bladeTop + 24, 2, 8);
+  ctx.fillStyle = '#3e2a18';
+  ctx.fillRect(x - 2, bladeTop + 28, 4, 5);
+  ctx.fillStyle = '#8a6238';
+  ctx.fillRect(x - 2, bladeTop + 28, 1, 5);
+  ctx.fillStyle = '#caa26e';
+  ctx.fillRect(x - 2, bladeTop + 33, 4, 2);
+  ctx.fillStyle = '#f2d992';
+  ctx.fillRect(x - 2, bladeTop + 33, 2, 1);
+  // Correa de muñeca.
+  ctx.strokeStyle = '#d6b47e';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + 2, bladeTop + 29);
+  ctx.quadraticCurveTo(x + 7, bladeTop + 32, x + 4, bladeTop + 36);
+  ctx.stroke();
+
+  // Destellos de disponibilidad.
+  if (!reducedMotion) {
+    const tw = 0.35 + Math.abs(Math.sin(elapsed * 2.2)) * 0.5;
+    ctx.fillStyle = `rgba(200, 252, 255, ${tw.toFixed(2)})`;
+    ctx.fillRect(x + 7, bladeTop - 2, 2, 2);
+    ctx.fillRect(x - 9, bladeTop + 14, 1, 1);
+  }
 }
 
 /** Pasarela de tablones donde el sendero de tierra entra en la arena de la playa. */
@@ -7175,8 +8829,46 @@ function drawDepartureBeacon(
 
 type NatalAvatarParams = Pick<
   IslaNatalRenderParams,
-  'player' | 'reducedMotion' | 'skinColor' | 'hairColor' | 'shirtColor' | 'appearance'
+  'player' | 'reducedMotion' | 'skinColor' | 'hairColor' | 'shirtColor' | 'appearance' | 'surprise'
 >;
+
+/** Reacción de sorpresa: globo «!» pixelado sobre la cabeza, sin tocar el sprite de Pixel. */
+function drawSurpriseBubble(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  elapsed: number,
+  reducedMotion: boolean
+): void {
+  const bob = reducedMotion ? 0 : Math.round(Math.sin(elapsed * 7.5));
+  const bx = Math.round(x);
+  const by = Math.round(y) - 54 + bob;
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  // Destellos que acompañan el sobresalto.
+  const spark = reducedMotion ? 0 : Math.round(Math.sin(elapsed * 11) * 1.5);
+  ctx.fillStyle = '#fde68a';
+  ctx.fillRect(bx - 13, by + 9 + spark, 3, 3);
+  ctx.fillRect(bx + 10, by + 6 - spark, 3, 3);
+  ctx.fillRect(bx - 10, by - 5, 2, 2);
+  ctx.fillRect(bx + 8, by - 3, 2, 2);
+
+  // Globo de diálogo con contorno oscuro.
+  ctx.fillStyle = '#0b1020';
+  ctx.fillRect(bx - 7, by, 14, 18);
+  ctx.fillRect(bx - 2, by + 18, 6, 3);
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(bx - 5, by + 2, 10, 14);
+  ctx.fillRect(bx - 1, by + 18, 4, 2);
+  ctx.fillRect(bx - 5, by + 16, 10, 1);
+
+  // Signo de exclamación legible a tamaño de juego.
+  ctx.fillStyle = '#b91c1c';
+  ctx.fillRect(bx - 1, by + 4, 2, 7);
+  ctx.fillRect(bx - 1, by + 13, 2, 2);
+  ctx.restore();
+}
 
 function drawPlayer(
   ctx: CanvasRenderingContext2D,
@@ -7287,10 +8979,16 @@ function drawPlayer(
   ctx.ellipse(p.x + 3, p.y + 3, 10, 4, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  // Respingo de sorpresa: sólo el dibujo sube 1-2px; la posición lógica no cambia.
+  const startle =
+    params.surprise && !params.reducedMotion
+      ? Math.abs(Math.round(Math.sin(elapsed * 14) * 2))
+      : 0;
+
   drawPixelAvatar4Dir(
     ctx,
     p.x,
-    p.y,
+    p.y - startle,
     p.facingDir,
     p.walking,
     p.sprinting,
@@ -7304,6 +9002,10 @@ function drawPlayer(
       appearance: params.appearance,
     }
   );
+
+  if (params.surprise) {
+    drawSurpriseBubble(ctx, p.x, p.y - startle, elapsed, params.reducedMotion);
+  }
 }
 
 function drawPromptBadge(ctx: CanvasRenderingContext2D, prompt: IslaNatalPromptSpec, bob: number): void {
@@ -7827,8 +9529,6 @@ export interface IslaNatalCabinRenderParams {
   prompt: IslaNatalPromptSpec | null;
   /** La mochila sigue colgada del clavo junto a la ventana. */
   backpackOnHook: boolean;
-  /** El cofre del abuelo ya fue abierto con la combinación. */
-  chestOpened: boolean;
   /** La radio de la mesa está encendida y suena durante la intro. */
   radioOn?: boolean;
   /** Interferencia y estática que interrumpen la transmisión de la radio. */
@@ -8801,62 +10501,6 @@ function drawCabinBackpack(ctx: CanvasRenderingContext2D, elapsed: number, reduc
   ctx.restore();
 }
 
-/** El cofre del abuelo, bajo el retrato familiar, con su cerradura de cuatro discos. */
-function drawCabinChest(
-  ctx: CanvasRenderingContext2D,
-  opened: boolean,
-  elapsed: number,
-  reducedMotion: boolean
-): void {
-  const { x, y } = ISLA_NATAL_CABIN.chest;
-  // Pozo de luz cálida para separar el cofre del parquet.
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  const glow = ctx.createRadialGradient(x, y + 4, 2, x, y + 4, 42);
-  glow.addColorStop(0, opened ? 'rgba(255, 214, 138, 0.16)' : 'rgba(255, 196, 110, 0.2)');
-  glow.addColorStop(1, 'rgba(255, 170, 80, 0)');
-  ctx.fillStyle = glow;
-  ctx.fillRect(x - 44, y - 38, 88, 84);
-  ctx.restore();
-
-  if (opened) {
-    // Tapa levantada contra la pared: sin ella el cofre abierto se confundía
-    // con un banco. Se dibuja detrás del cuerpo, con sus herrajes dorados.
-    ctx.fillStyle = '#2a1a0e';
-    ctx.fillRect(x - 15, y - 29, 30, 10);
-    ctx.fillStyle = '#8b4e20';
-    ctx.fillRect(x - 14, y - 28, 28, 8);
-    ctx.fillStyle = '#b4672e';
-    ctx.fillRect(x - 14, y - 28, 28, 2);
-    ctx.fillStyle = '#facc15';
-    ctx.fillRect(x - 10, y - 28, 2, 8);
-    ctx.fillRect(x + 8, y - 28, 2, 8);
-    ctx.fillStyle = '#070b14';
-    ctx.fillRect(x - 9, y - 20, 3, 2);
-    ctx.fillRect(x + 6, y - 20, 3, 2);
-  }
-
-  drawRpgTreasureChest(ctx, x, y, opened, '#facc15', elapsed, reducedMotion);
-
-  if (opened) {
-    // Carta y fotografía asomando del interior de terciopelo.
-    ctx.fillStyle = '#f4e6c4';
-    ctx.fillRect(x - 9, y - 13, 12, 6);
-    ctx.fillStyle = '#d8c49a';
-    ctx.fillRect(x - 9, y - 11, 12, 1);
-    ctx.fillStyle = '#2f4a6a';
-    ctx.fillRect(x + 3, y - 15, 9, 8);
-    ctx.fillStyle = '#bcd2e6';
-    ctx.fillRect(x + 4, y - 14, 7, 2);
-    ctx.fillStyle = '#e8d7b4';
-    ctx.fillRect(x + 5, y - 11, 4, 3);
-  } else if (!reducedMotion && Math.floor(elapsed * 2.2) % 4 === 0) {
-    // La cerradura devuelve un destello: el cofre sabe que ya puedes abrirlo.
-    ctx.fillStyle = '#fff6cf';
-    ctx.fillRect(x + 1, y - 10, 2, 2);
-  }
-}
-
 /** Radio encendida sobre la mesa: dial cálido y ondas de sonido. */
 function drawCabinRadioLive(
   ctx: CanvasRenderingContext2D,
@@ -8954,7 +10598,6 @@ export function renderIslaNatalCabin(params: IslaNatalCabinRenderParams): void {
   ctx.translate(-Math.round(camera.x), -Math.round(camera.y));
   drawCabinShell(ctx, elapsed, reducedMotion);
   drawCabinFurniture(ctx, elapsed, reducedMotion);
-  drawCabinChest(ctx, params.chestOpened, elapsed, reducedMotion);
   if (params.radioOn) drawCabinRadioLive(ctx, elapsed, reducedMotion);
   if (params.radioStatic) {
     drawCabinRadioStatic(ctx, params.radioStatic.t, elapsed, reducedMotion);
@@ -9302,6 +10945,8 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     prompt,
     shockwaves,
     travelerEvent,
+    envoy,
+    nightStorm,
   } = params;
   if (!ctx) return;
 
@@ -9359,7 +11004,8 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     variant: 'forest' | 'meadow' | 'pine',
     treeIndex: number,
     elapsed: number,
-    reducedMotion: boolean
+    reducedMotion: boolean,
+    sizeMultiplier = 1
   ) => {
     const x = Math.round(cx);
     const y = Math.round(cy);
@@ -9370,9 +11016,9 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     const flipped = seed > 0.54;
     const sprite = spritePair ? spritePair[flipped ? 1 : 0] : null;
 
-    // 15% a 30% de variación aleatoria en escala para destruir repetición
-    const sizeScale = 0.85 + seed * 0.30;
-    const baseSize = useTallVariant ? 80 : 84;
+    // Variación de escala sembrada + multiplicador de roble centenario.
+    const sizeScale = sizeMultiplier * (0.85 + seed * 0.30);
+    const baseSize = useTallVariant ? 86 : 90;
     const size = Math.round(baseSize * sizeScale);
 
     // Inclinación orgánica y oscilación de brisa
@@ -9442,10 +11088,13 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
       ctx.imageSmoothingEnabled = false;
 
       // Variación sutil de color y matiz por semilla (sin alterar paleta base)
-      const tintVal = (hash2(x - 29, y + 19) - 0.5) * 14;
-      const brightness = 96 + Math.round(seed * 8);
+      const tintVal = (hash2(x - 29, y + 19) - 0.5) * 26;
+      const brightness = 88 + Math.round(seed * 20);
       ctx.filter = `hue-rotate(${Math.round(tintVal)}deg) brightness(${brightness}%)`;
-      ctx.drawImage(sprite, Math.round(-size * 0.5), Math.round(-size * 0.94), size, size);
+      // El roble alto se dibuja algo más esbelto: tercera silueta sin repetir el sprite.
+      const spriteW = useTallVariant ? Math.round(size * 0.9) : size;
+      const spriteH = useTallVariant ? Math.round(size * 1.06) : size;
+      ctx.drawImage(sprite, Math.round(-spriteW * 0.5), Math.round(-spriteH * 0.94), spriteW, spriteH);
       ctx.filter = 'none';
       ctx.restore();
     } else {
@@ -9491,14 +11140,15 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
 
   for (let ti = 0; ti < ISLA_NATAL_TREES.length; ti++) {
     const tree = ISLA_NATAL_TREES[ti];
-    if (!isWorldBoxVisible(tree.x - 52, tree.y - 100, 104, 116, camX, camY, vw, vh)) continue;
+    const treeScale = tree.scale ?? 1;
+    if (!isWorldBoxVisible(tree.x - 90 * treeScale, tree.y - 150 * treeScale, 180 * treeScale, 170 * treeScale, camX, camY, vw, vh)) continue;
     // En la zona suroeste, algunos árboles enmarcan el tejado rojo por detrás y sus copas solapan con él creando profundidad
     const overlaysCottageRoof = tree.x >= 580 && tree.x <= 720 && tree.y >= 870 && tree.y <= 910;
     const sortY = overlaysCottageRoof ? HUT_POS.y + 98 : tree.y + 10;
     ySorted.push({
       sortY,
       draw: () =>
-        drawHandcraftedTreeNatal(ctx, tree.x, tree.y, tree.variant, ti, elapsed, reducedMotion),
+        drawHandcraftedTreeNatal(ctx, tree.x, tree.y, tree.variant, ti, elapsed, reducedMotion, treeScale),
     });
   }
   for (const p of ISLA_NATAL_PALMS) {
@@ -9537,7 +11187,7 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
   for (const b of NATAL_PATH_SIDE_BUSHES) {
     if (isIslaNatalPointOnPath(b.x, b.y)) continue;
     if (!isWorldBoxVisible(b.x - 16, b.y - 20, 32, 28, camX, camY, vw, vh)) continue;
-    ySorted.push({ sortY: b.y + 1, draw: () => drawBushCluster(ctx, b.x, b.y, b.seed, elapsed, reducedMotion, 0.75) });
+    ySorted.push({ sortY: b.y + 1, draw: () => drawBushCluster(ctx, b.x, b.y, b.seed, elapsed, reducedMotion, b.scale ?? 0.75) });
   }
   for (const c of ISLA_NATAL_CLUTTER) {
     if (!isWorldBoxVisible(c.x - 10, c.y - 10, 20, 20, camX, camY, vw, vh)) continue;
@@ -9547,7 +11197,7 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
 
   // Peñascos, tronco, cargas del muelle y rocas costeras que dan cuerpo a los bloqueos del mapa.
   for (const solid of ISLA_NATAL_SOLIDS) {
-    if (solid.id === 'cabana' || solid.id === 'cobertizo') continue;
+    if (solid.id === 'cabana' || solid.id === 'cobertizo' || solid.id === 'huerta') continue;
     if (
       !isWorldBoxVisible(solid.x - 32, solid.y - 48, solid.w + 68, solid.h + 64, camX, camY, vw, vh)
     ) {
@@ -9577,6 +11227,10 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     }
   }
 
+  ySorted.push({
+    sortY: HUERTA_SPRITE_RECT.y + HUERTA_SPRITE_RECT.h - 8,
+    draw: () => drawHuertaGarden(ctx, elapsed, reducedMotion),
+  });
   ySorted.push({ sortY: HUT_POS.y + 96, draw: () => drawHut(ctx, elapsed, reducedMotion) });
   ySorted.push({ sortY: SHED_POS.y + 124, draw: () => drawShed(ctx, elapsed, arcadeState, reducedMotion) });
   for (const sign of ISLA_NATAL_SIGNS) {
@@ -9600,6 +11254,12 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     ySorted.push({
       sortY: CABINET_POS.y + 24,
       draw: () => drawPaddleItem(ctx, elapsed, reducedMotion),
+    });
+  }
+  if (envoy) {
+    ySorted.push({
+      sortY: envoy.y + 4,
+      draw: () => drawFutureTraveler(ctx, envoy.x, envoy.y, elapsed, -1, false),
     });
   }
   if (travelerEvent && travelerEvent.phase !== 'storm') {
@@ -9735,11 +11395,69 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     ctx.restore();
   }
 
+  // Noche de la tormenta del prólogo: cielo cerrado, lluvia y relámpagos.
+  // Se dibuja antes del cartel de interacción para que la lectura no se pierda.
+  // `fade` permite que la nube negra se disipe de forma progresiva sin cortar
+  // el resto de la escena: 1 = tormenta plena, 0 = día despejado.
+  if (nightStorm) {
+    const fade = Math.max(0, Math.min(1, nightStorm.fade ?? 1));
+    const flash = Math.max(0, Math.min(1, nightStorm.flash)) * fade;
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = 'rgba(5, 12, 30, 0.6)';
+    ctx.fillRect(camX, camY, vw, vh);
+
+    const nightSky = ctx.createLinearGradient(camX, camY, camX, camY + vh);
+    nightSky.addColorStop(0, 'rgba(18, 40, 82, 0.45)');
+    nightSky.addColorStop(0.55, 'rgba(6, 16, 36, 0.14)');
+    nightSky.addColorStop(1, 'rgba(2, 6, 16, 0.38)');
+    ctx.fillStyle = nightSky;
+    ctx.fillRect(camX, camY, vw, vh);
+
+    // Lluvia fina con inclinación y parallax. La densidad baja con el fade.
+    if (fade > 0.02) {
+      ctx.strokeStyle = 'rgba(180, 208, 240, 0.22)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const rainCount = Math.round((reducedMotion ? 44 : 96) * fade);
+      for (let i = 0; i < rainCount; i += 1) {
+        const n1 = hash2(i * 37 + 11, 3);
+        const n2 = hash2(i * 53 + 5, 7);
+        const speed = 320 + n2 * 460;
+        const x = camX - 30 + ((n1 * (vw + 60) + elapsed * 44) % (vw + 60));
+        const y = camY - 30 + ((n2 * (vh + 60) + elapsed * speed) % (vh + 60));
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - 5, y + 16);
+      }
+      ctx.stroke();
+    }
+
+    // El rayo ilumina la casa, los árboles y la hierba.
+    if (flash > 0.015) {
+      const houseX = HUT_POS.x + 96 - camX;
+      const houseY = HUT_POS.y + 54 - camY;
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      const bloom = ctx.createRadialGradient(houseX, houseY, 20, houseX, houseY, 560);
+      bloom.addColorStop(0, `rgba(206, 228, 255, ${0.42 * flash})`);
+      bloom.addColorStop(0.4, `rgba(118, 158, 224, ${0.16 * flash})`);
+      bloom.addColorStop(1, 'rgba(40, 70, 140, 0)');
+      ctx.fillStyle = bloom;
+      ctx.fillRect(camX, camY, vw, vh);
+      ctx.restore();
+      ctx.fillStyle = `rgba(214, 232, 255, ${0.12 * flash})`;
+      ctx.fillRect(camX, camY, vw, vh);
+    }
+    ctx.restore();
+  }
+
   if (prompt) {
     drawPromptBadge(ctx, prompt, animFrame4 % 2 === 0 ? 0 : -2);
   }
 
-  // Pájaros sobre la isla (se dispersan con la señal)
+  // Pájaros sobre la isla (se dispersan con la señal). Vuelven cuando la
+  // tormenta se disipa.
+  if (!nightStorm || (nightStorm.fade ?? 1) < 0.55) {
   ctx.save();
   const birdScatter = signalPulse > 0.3 ? 2.4 : 1;
   for (let i = 0; i < 3; i++) {
@@ -9756,6 +11474,7 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     ctx.fillRect(Math.round(bx) - 14, Math.round(by) + 26, 5, 2);
   }
   ctx.restore();
+  }
 
   ctx.restore();
 
@@ -9766,40 +11485,62 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
   ctx.fillStyle = vig;
   ctx.fillRect(0, 0, vw, vh);
 
-  // Neblina cálida del atardecer y frescor del mar en el borde inferior
-  const haze = ctx.createLinearGradient(0, 0, 0, vh);
-  haze.addColorStop(0, 'rgba(255, 190, 126, 0.13)');
-  haze.addColorStop(0.42, 'rgba(255, 172, 114, 0.05)');
-  haze.addColorStop(0.78, 'rgba(90, 120, 170, 0.04)');
-  haze.addColorStop(1, 'rgba(52, 46, 96, 0.13)');
-  ctx.fillStyle = haze;
-  ctx.fillRect(0, 0, vw, vh);
+  if (!nightStorm || (nightStorm.fade ?? 1) < 0.7) {
+    // Neblina cálida del atardecer y frescor del mar en el borde inferior
+    const haze = ctx.createLinearGradient(0, 0, 0, vh);
+    haze.addColorStop(0, 'rgba(255, 190, 126, 0.13)');
+    haze.addColorStop(0.42, 'rgba(255, 172, 114, 0.05)');
+    haze.addColorStop(0.78, 'rgba(90, 120, 170, 0.04)');
+    haze.addColorStop(1, 'rgba(52, 46, 96, 0.13)');
+    ctx.fillStyle = haze;
+    ctx.fillRect(0, 0, vw, vh);
 
-  // Rayo de sol rasante desde el oeste (sutil, acompaña al sol del mapa)
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  const ray = ctx.createLinearGradient(0, vh * 0.18, vw * 0.7, vh * 0.82);
-  ray.addColorStop(0, 'rgba(255, 200, 130, 0.07)');
-  ray.addColorStop(1, 'rgba(255, 160, 100, 0)');
-  ctx.fillStyle = ray;
-  ctx.fillRect(0, 0, vw, vh);
-  ctx.restore();
+    // Rayo de sol rasante desde el oeste (sutil, acompaña al sol del mapa)
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const ray = ctx.createLinearGradient(0, vh * 0.18, vw * 0.7, vh * 0.82);
+    ray.addColorStop(0, 'rgba(255, 200, 130, 0.07)');
+    ray.addColorStop(1, 'rgba(255, 160, 100, 0)');
+    ctx.fillStyle = ray;
+    ctx.fillRect(0, 0, vw, vh);
+    ctx.restore();
 
-  // Bloom localizado del sol bajo. Puramente atmosférico: no toca objetos,
-  // colisiones ni lectura, y sólo se pinta si el sol entra en cuadro.
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  const sunSX = 120 - camX;
-  const sunSY = 420 - camY;
-  if (sunSX > -360 && sunSX < vw + 360 && sunSY > -360 && sunSY < vh + 360) {
-    const bloom = ctx.createRadialGradient(sunSX, sunSY, 4, sunSX, sunSY, 340);
-    bloom.addColorStop(0, 'rgba(255, 232, 176, 0.14)');
-    bloom.addColorStop(0.38, 'rgba(255, 198, 126, 0.06)');
-    bloom.addColorStop(1, 'rgba(255, 168, 100, 0)');
-    ctx.fillStyle = bloom;
-    ctx.fillRect(sunSX - 340, sunSY - 340, 680, 680);
+    // Bloom localizado del sol bajo. Puramente atmosférico: no toca objetos,
+    // colisiones ni lectura, y sólo se pinta si el sol entra en cuadro.
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const sunSX = 120 - camX;
+    const sunSY = 420 - camY;
+    if (sunSX > -360 && sunSX < vw + 360 && sunSY > -360 && sunSY < vh + 360) {
+      const bloom = ctx.createRadialGradient(sunSX, sunSY, 4, sunSX, sunSY, 340);
+      bloom.addColorStop(0, 'rgba(255, 232, 176, 0.14)');
+      bloom.addColorStop(0.38, 'rgba(255, 198, 126, 0.06)');
+      bloom.addColorStop(1, 'rgba(255, 168, 100, 0)');
+      ctx.fillStyle = bloom;
+      ctx.fillRect(sunSX - 340, sunSY - 340, 680, 680);
+    }
+    ctx.restore();
   }
-  ctx.restore();
+  if (nightStorm && (nightStorm.fade ?? 1) > 0.05) {
+    // La noche cierra el encuadre con un velo azul frío en los bordes. El velo
+    // se retira a la vez que la nube para devolver el día.
+    ctx.save();
+    ctx.globalAlpha = nightStorm.fade ?? 1;
+    const nightVignette = ctx.createRadialGradient(
+      vw / 2,
+      vh / 2,
+      Math.min(vw, vh) * 0.22,
+      vw / 2,
+      vh / 2,
+      Math.max(vw, vh) * 0.78
+    );
+    nightVignette.addColorStop(0, 'rgba(0,0,0,0)');
+    nightVignette.addColorStop(0.65, 'rgba(4, 10, 26, 0.24)');
+    nightVignette.addColorStop(1, 'rgba(1, 4, 12, 0.7)');
+    ctx.fillStyle = nightVignette;
+    ctx.fillRect(0, 0, vw, vh);
+    ctx.restore();
+  }
 
   // Tormenta de la llegada: el cielo se oscurece y se parte en destellos.
   if (travelerEvent?.phase === 'storm') {

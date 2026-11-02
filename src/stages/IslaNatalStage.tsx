@@ -23,9 +23,7 @@ import {
   ARCADE_DIALOG_DUSTY,
   ARCADE_DIALOG_LEVER_READY,
   ARCADE_DIALOG_MISSING_LEVER,
-  ARCADE_DIALOG_POWER_ON,
   ARCADE_DIALOG_SPENT,
-  DEPARTURE_BLOCKED_DIALOG,
   ISLA_NATAL_ARCADE_ANCHOR,
   ISLA_NATAL_CABIN,
   ISLA_NATAL_CHEST_CODE,
@@ -41,11 +39,10 @@ import {
   ISLA_NATAL_WORLD_W,
   ISLA_NATAL_ZONES,
   NATAL_CABIN_RADIO_SILENT_DIALOG,
-  NATAL_CHEST_EMPTY_DIALOG,
-  NATAL_CHEST_LOCKED_DIALOG,
-  NATAL_CHEST_NEEDS_BACKPACK_DIALOG,
-  NATAL_CHEST_REVEAL_DIALOG,
   NATAL_NO_BACKPACK_EXIT_DIALOG,
+  NATAL_PORT_NEED_BAR_DIALOG,
+  NATAL_PORT_NEED_PONG_DIALOG,
+  NATAL_PROLOGUE_ENVOY_DIALOG,
   NATAL_TRAVELER_DIALOG,
   PADDLE_DIALOG,
   isCabinInteriorWalkable,
@@ -70,6 +67,8 @@ const WALK_SPEED = 200;
 const SPRINT_SPEED = 300;
 const SIGNAL_DECAY = 0.2;
 const DEPARTURE_DURATION = 4.6;
+/** La nube negra se disipa despacio después de que el enviado desaparece. */
+const STORM_CLEAR_MS = 11000;
 
 function cubicLerp(a: number, b: number, c: number, d: number, t: number): number {
   const inv = 1 - t;
@@ -105,9 +104,9 @@ const CABIN_INTRO_DIALOG: IslaNatalDialog = {
     'La puerta se cierra a tu espalda y el ruido del mar queda afuera. Adentro huele a leña, a pan de ayer y a la lámpara de aceite que nadie apagó.',
     'La cama está hecha, la mesa puesta para dos y la cocina todavía tibia. Nada ha cambiado desde la última vez que jugaste aquí.',
     'Junto a la ventana, colgada de un clavo, sigue tu vieja mochila de lona.',
-    'Bajo el retrato familiar descansa el cofre del abuelo, cerrado con cuatro discos de latón. Nunca te dejó abrirlo.',
+    'El cofre del abuelo ya no está aquí: lo dejó en el comedor, junto a la mesa donde se sentaba a jugar contigo.',
   ],
-  hint: 'Acércate a la mochila y pulsa [E] para llevártela. El cofre espera bajo el retrato.',
+  hint: 'Acércate a la mochila y pulsa [E] para llevártela. El cofre del abuelo espera en el comedor.',
 };
 
 const CABIN_BACKPACK_DIALOG: IslaNatalDialog = {
@@ -128,9 +127,9 @@ type NatalPromptKind =
   | 'arcade'
   | 'paddle'
   | 'departure'
+  | 'envoy'
   | 'cabin-exit'
   | 'cabin-backpack'
-  | 'cabin-chest'
   | 'cabin-radio';
 
 /**
@@ -211,6 +210,8 @@ export interface IslaNatalStageProps {
   shirtColor: string;
   appearance: AvatarAppearance;
   narrativeEvents: string[];
+  /** Inventario persistente: permite saber si Pixel lleva la palanca. */
+  inventoryItems?: string[];
   onRecordNarrativeEvent: (eventId: string) => void;
   onDepartToOrigin: () => void;
   /** Llegada desde Isla Origen: aparecer en el puerto norte con un aviso. */
@@ -220,6 +221,10 @@ export interface IslaNatalStageProps {
   onGrantInventoryItems: (itemIds: string[]) => void;
   /** Retira objetos consumidos en el mundo, como la palanca del gabinete. */
   onConsumeInventoryItems: (itemIds: string[]) => void;
+  /** Prólogo: Pixel sale del comedor a la isla de noche, bajo la tormenta. */
+  prologueNight?: boolean;
+  /** Prólogo: volver al comedor al cruzar la puerta principal de la casa. */
+  onReturnToComedor?: () => void;
 }
 
 export function IslaNatalStage({
@@ -228,12 +233,15 @@ export function IslaNatalStage({
   shirtColor,
   appearance,
   narrativeEvents,
+  inventoryItems = [],
   onRecordNarrativeEvent,
   onDepartToOrigin,
   arrivedFromOrigen = false,
   onArrivalNoticeShown,
   onGrantInventoryItems,
   onConsumeInventoryItems,
+  prologueNight = false,
+  onReturnToComedor,
 }: IslaNatalStageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [keybindings] = useState<KeybindingsMap>(() => loadKeybindings());
@@ -266,32 +274,39 @@ export function IslaNatalStage({
       : 'dusty';
   const paddleOnGround = pongWon && !paddleCarried;
   const hasBackpack = flagSet.has(NATAL_FLAGS.backpack);
-  // El cofre solo se abre con la combinación que entrega el viajero.
-  const chestOpened = flagSet.has(NATAL_FLAGS.chestOpened);
-  const chestCodeKnown = flagSet.has(NATAL_FLAGS.travelerWarning);
   const leverInstalled = flagSet.has(NATAL_FLAGS.leverInstalled) || arcadePowered;
+  const leverCarried = inventoryItems.includes('item-palanca-pong');
+  const stormCleared = flagSet.has(NATAL_FLAGS.stormCleared);
   // El puerto norte sólo abre el carril de surf cuando Pong está ganado, la
   // Barra de Pong está en manos del jugador y la mochila ha sido recogida.
   const departureReady = pongWon && paddleCarried && hasBackpack;
   const startAtNorthPort = pongWon && paddleCarried;
+  // Cualquier salida de la casa del prólogo devuelve a Pixel junto a su puerta,
+  // también después de abrir el cofre y al reanudar la partida.
+  const fromPrologueHouse =
+    !prologueNight &&
+    !flagSet.has(NATAL_FLAGS.departed) &&
+    flagSet.has(NATAL_FLAGS.chestOpened);
 
   // Partida nueva: Pixel ya vive en la cabaña. La intro (radio, temblor y
   // aviso del viajero) ocurre adentro antes de salir a la isla.
+  // En el prólogo nocturno la radio y la puerta ya ocurrieron en el dormitorio
+  // y el comedor: aquí sólo se juega el exterior, junto a la casa.
   const introInsideCabin =
+    !prologueNight &&
     !flagSet.has(NATAL_FLAGS.firstLight) &&
     !flagSet.has(NATAL_FLAGS.travelerWarning) &&
     !pongWon &&
     !arcadePowered;
   const introInsideCabinRef = useRef(introInsideCabin);
+  const prologueNightRef = useRef(prologueNight);
+  prologueNightRef.current = prologueNight;
 
   /* -------------------------------------------------------------- */
   /* DIÁLOGO                                                         */
   /* -------------------------------------------------------------- */
 
   const [dialogModal, setDialogModal] = useState<NatalDialogModal | null>(null);
-  const [chestCodeOpen, setChestCodeOpen] = useState(false);
-  const [chestCode, setChestCode] = useState('');
-  const [chestCodeError, setChestCodeError] = useState(false);
   const [dialogueVisibleChars, setDialogueVisibleChars] = useState(0);
   const [dialogueLineIndex, setDialogueLineIndex] = useState(0);
   const dialogueLines = dialogModal?.dialog.lines ?? null;
@@ -344,8 +359,11 @@ export function IslaNatalStage({
 
   // La conversación respira sola: las líneas cortas avanzan sin obligar a
   // pulsar una tecla entre cada frase. Un clic o [E] acelera el turno.
+  // El encuentro del enviado es la excepción: sus líneas avanzan sólo con [E]
+  // (la primera pulsación completa el texto y la siguiente pasa de turno).
   useEffect(() => {
     if (!dialogModal || !dialogueLines) return undefined;
+    if (dialogModal.dialog === NATAL_PROLOGUE_ENVOY_DIALOG) return undefined;
     if (dialogueVisibleChars < dialogueFullText.length) return undefined;
     const isLast = dialogueLineIndex >= dialogueLines.length - 1;
     const timer = window.setTimeout(
@@ -361,6 +379,48 @@ export function IslaNatalStage({
     dialogueVisibleChars,
   ]);
 
+  // Partida reanudada después del encuentro: la tormenta ya no vuelve a
+  // activarse al entrar o salir de la casa.
+  const stormResumeHandledRef = useRef(false);
+  useEffect(() => {
+    if (stormResumeHandledRef.current) return;
+    stormResumeHandledRef.current = true;
+    const flags = stageRef.current.flagSet;
+    if (
+      flags.has(NATAL_FLAGS.travelerWarning) &&
+      !flags.has(NATAL_FLAGS.stormCleared)
+    ) {
+      stormClearStartRef.current = performance.now() - STORM_CLEAR_MS;
+      markFlag(NATAL_FLAGS.stormCleared);
+    }
+  }, [markFlag]);
+
+  // Ruido de la máquina del tiempo justo antes de la última frase del enviado:
+  // la desaparición se oye, no se explica con texto extra.
+  const envoyWarpRef = useRef(false);  useEffect(() => {
+    if (!dialogModal || dialogModal.dialog !== NATAL_PROLOGUE_ENVOY_DIALOG) {
+      envoyWarpRef.current = false;
+      return;
+    }
+    const lines = dialogModal.dialog.lines;
+    if (!lines || envoyWarpRef.current) return;
+    const lastIndex = lines.length - 1;
+    if (dialogueLineIndex !== lastIndex) return;
+    if (dialogueVisibleChars < (lines[lastIndex]?.text.length ?? 0)) return;
+    envoyWarpRef.current = true;
+    retroAudio.timeMachineWarp();
+    window.dispatchEvent(new CustomEvent('pixelverse-shake'));
+    emitParticles(
+      particlesRef.current,
+      ISLA_NATAL_TRAVELER_SITE.x,
+      ISLA_NATAL_TRAVELER_SITE.y - 8,
+      34,
+      '#a5f3fc',
+      72,
+      22
+    );
+  }, [dialogModal, dialogueLineIndex, dialogueVisibleChars]);
+
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const showToast = useCallback((message: string) => {
@@ -374,6 +434,18 @@ export function IslaNatalStage({
     },
     []
   );
+
+  // Si la partida se reanuda después de recibir el código, el objetivo sigue visible.
+  const prologueHintShownRef = useRef(false);
+  useEffect(() => {
+    if (!prologueNight || prologueHintShownRef.current) return;
+    if (flagSet.has(NATAL_FLAGS.travelerWarning) && !flagSet.has(NATAL_FLAGS.chestOpened)) {
+      prologueHintShownRef.current = true;
+      showToast(
+        `Regresa a la casa y abre el cofre de tu abuelo (código ${ISLA_NATAL_CHEST_CODE}).`
+      );
+    }
+  }, [flagSet, prologueNight, showToast]);
 
   // Aviso único al desembarcar de vuelta desde Isla Origen: el jugador
   // aparece en el puerto norte con todo su inventario y sus banderas.
@@ -409,6 +481,20 @@ export function IslaNatalStage({
   const doorExitTriggeredRef = useRef(false);
   const cabinFadeTimerRef = useRef<number | null>(null);
   const [cabinFade, setCabinFade] = useState(false);
+  /** El enviado del prólogo desaparece con su máquina tras entregar el código. */
+  const [envoyGone, setEnvoyGone] = useState(false);
+  const envoyVisible = prologueNight && !flagSet.has(NATAL_FLAGS.travelerWarning) && !envoyGone;
+  /** Encuentro automático al cruzar la puerta: bloquea el paso y muestra la sorpresa. */
+  const envoyLockRef = useRef(false);
+  const envoySurpriseRef = useRef(false);
+  /**
+   * La tormenta se disipa de forma progresiva cuando el enviado se marcha.
+   * El bloqueo de control es cinematográfico y termina con `stormCleared`.
+   */
+  const stormClearStartRef = useRef<number | null>(null);
+  const stormCinematicRef = useRef(false);
+  const stormClearedFiredRef = useRef(false);
+  const [stormCinematic, setStormCinematic] = useState(false);
   /** Pixel comienza dentro de su casa en una partida nueva. */
   const [cabinInside, setCabinInside] = useState(introInsideCabinRef.current);
   const [introCaption, setIntroCaption] = useState<NatalIntroCaption | null>(null);
@@ -442,13 +528,26 @@ export function IslaNatalStage({
     // Al volver de Pong, el jugador aparece junto al puerto norte con la barra
     // lista: la salida queda a la vista en lugar de perderse en la playa sur.
     // En partida nueva arranca adentro de la casa, frente a la radio.
-    x: introInsideCabinRef.current
-      ? ISLA_NATAL_CABIN.introSpot.x
-      : (startAtNorthPort ? ISLA_NATAL_NORTH_PORT_SPAWN : ISLA_NATAL_SPAWN).x,
-    y: introInsideCabinRef.current
-      ? ISLA_NATAL_CABIN.introSpot.y
-      : (startAtNorthPort ? ISLA_NATAL_NORTH_PORT_SPAWN : ISLA_NATAL_SPAWN).y,
-    facingDir: (introInsideCabinRef.current ? 'right' : 'up') as FacingDirection,
+    // En el prólogo nocturno aparece afuera, frente a la puerta de su casa.
+    x: prologueNight
+      ? ISLA_NATAL_TRAVELER_SCENE_PLAYER.x
+      : introInsideCabinRef.current
+        ? ISLA_NATAL_CABIN.introSpot.x
+        : startAtNorthPort
+          ? ISLA_NATAL_NORTH_PORT_SPAWN.x
+          : fromPrologueHouse
+            ? ISLA_NATAL_TRAVELER_SCENE_PLAYER.x
+            : ISLA_NATAL_SPAWN.x,
+    y: prologueNight
+      ? ISLA_NATAL_TRAVELER_SCENE_PLAYER.y
+      : introInsideCabinRef.current
+        ? ISLA_NATAL_CABIN.introSpot.y
+        : startAtNorthPort
+          ? ISLA_NATAL_NORTH_PORT_SPAWN.y
+          : fromPrologueHouse
+            ? ISLA_NATAL_TRAVELER_SCENE_PLAYER.y
+            : ISLA_NATAL_SPAWN.y,
+    facingDir: (prologueNight || introInsideCabinRef.current ? 'right' : 'up') as FacingDirection,
     walking: false,
     sprinting: false,
     interactAnim: 0,
@@ -485,9 +584,10 @@ export function IslaNatalStage({
     arcadeState,
     paddleOnGround,
     departureReady,
-    chestOpened,
-    chestCodeKnown,
     leverInstalled,
+    leverCarried,
+    stormCleared,
+    envoyVisible,
     skinColor,
     hairColor,
     shirtColor,
@@ -507,16 +607,17 @@ export function IslaNatalStage({
     arcadeState,
     paddleOnGround,
     departureReady,
-    chestOpened,
-    chestCodeKnown,
     leverInstalled,
+    leverCarried,
+    stormCleared,
+    envoyVisible,
     skinColor,
     hairColor,
     shirtColor,
     appearance,
     dialogOpen: dialogModal !== null,
     dialogLockClose: Boolean(dialogModal?.lockClose),
-    codeOpen: chestCodeOpen,
+    codeOpen: false,
     challengeOpen,
     vistaOpen,
     showZoneBanner,
@@ -552,21 +653,38 @@ export function IslaNatalStage({
       life: 1.6,
     });
     chargeRef.current = Math.max(chargeRef.current, 0.2);
+  }, [markFlag]);
+
+  const showArcadeReady = useCallback(() => {
     setDialogModal({
-      category: 'LA ARBOLEDA · TUBO CATÓDICO',
+      category: 'LA ARBOLEDA · LA PALANCA DEL ABUELO',
       tone: 'arcane',
-      dialog: ARCADE_DIALOG_POWER_ON,
-      primary: { label: 'Jugar · 3 goles', run: openChallenge },
+      dialog: ARCADE_DIALOG_LEVER_READY,
     });
-  }, [markFlag, openChallenge]);
+  }, []);
 
   const installLever = useCallback(() => {
+    const flags = stageRef.current.flagSet;
+    if (flags.has(NATAL_FLAGS.leverInstalled)) return;
+    if (!flags.has(NATAL_FLAGS.arcadeFound)) return;
+    // Instalación inmediata: sin menú, sin confirmación y sin segunda pulsación.
     markFlag(NATAL_FLAGS.leverInstalled);
     // La palanca deja el inventario: queda montada en el gabinete, no se duplica.
     consumeInventoryRef.current(['item-palanca-pong']);
-    // Instalar la palanca es el gesto que devuelve la corriente al gabinete.
     powerOnArcade();
-  }, [markFlag, powerOnArcade]);
+    retroAudio.achievementUnlock();
+    emitParticles(
+      particlesRef.current,
+      ISLA_NATAL_ARCADE_ANCHOR.x,
+      ISLA_NATAL_ARCADE_ANCHOR.y - 34,
+      26,
+      '#f5d9a0',
+      44,
+      14
+    );
+    showToast('La palanca quedó montada en el gabinete.');
+    showArcadeReady();
+  }, [markFlag, powerOnArcade, showArcadeReady, showToast]);
 
   const interactArcade = useCallback(() => {
     const flags = stageRef.current.flagSet;
@@ -581,9 +699,15 @@ export function IslaNatalStage({
         });
         return;
       }
+      // Ya hay una palanca montada (partida antigua): sólo falta dar corriente.
+      if (flags.has(NATAL_FLAGS.leverInstalled)) {
+        powerOnArcade();
+        showArcadeReady();
+        return;
+      }
       // Sin la palanca del cofre la máquina no responde: primero hay que
-      // volver a la cabaña, abrir el cofre y traer el mecanismo.
-      if (!flags.has(NATAL_FLAGS.chestOpened) && !flags.has(NATAL_FLAGS.pongWon)) {
+      // volver a la casa, abrir el cofre y traer el mecanismo.
+      if (!stageRef.current.leverCarried) {
         setDialogModal({
           category: 'LA ARBOLEDA · LA RANURA VACÍA',
           tone: 'arcane',
@@ -591,25 +715,13 @@ export function IslaNatalStage({
         });
         return;
       }
-      if (!flags.has(NATAL_FLAGS.leverInstalled)) {
-        setDialogModal({
-          category: 'LA ARBOLEDA · LA PALANCA DEL ABUELO',
-          tone: 'arcane',
-          dialog: ARCADE_DIALOG_LEVER_READY,
-          primary: { label: 'Instalar la palanca', run: installLever },
-        });
-        return;
-      }
-      powerOnArcade();
+      // Con la palanca en mano, la E la coloca al instante.
+      installLever();
       return;
     }
     if (!flags.has(NATAL_FLAGS.pongWon)) {
-      setDialogModal({
-        category: 'LA ARBOLEDA · TUBO CATÓDICO',
-        tone: 'arcane',
-        dialog: ARCADE_DIALOG_POWER_ON,
-        primary: { label: 'Jugar · 3 goles', run: openChallenge },
-      });
+      // La corriente ya está: la E inicia el minijuego existente, sin preguntas.
+      openChallenge();
       return;
     }
     const carried = flags.has(NATAL_FLAGS.paddle);
@@ -618,32 +730,35 @@ export function IslaNatalStage({
       tone: 'arcane',
       dialog: carried ? ARCADE_DIALOG_SPENT : ARCADE_DIALOG_AFTER_WIN,
     });
-  }, [installLever, markFlag, openChallenge, powerOnArcade]);
+  }, [installLever, markFlag, openChallenge, powerOnArcade, showArcadeReady]);
 
   const interactPaddle = useCallback(() => {
+    const flags = stageRef.current.flagSet;
+    // Se recoge una sola vez. No hay segunda confirmación ni duplicado.
+    if (flags.has(NATAL_FLAGS.paddle)) return;
+    markFlag(NATAL_FLAGS.paddle);
+    retroAudio.achievementUnlock();
+    emitParticles(
+      particlesRef.current,
+      ISLA_NATAL_PADDLE_ANCHOR.x,
+      ISLA_NATAL_PADDLE_ANCHOR.y - 18,
+      60,
+      '#e0faff',
+      74,
+      34
+    );
+    shockwavesRef.current.push({
+      x: ISLA_NATAL_PADDLE_ANCHOR.x,
+      y: ISLA_NATAL_PADDLE_ANCHOR.y - 10,
+      t: 0,
+      life: 1.4,
+    });
     setDialogModal({
-      category: 'LA ARBOLEDA · LA PALETA',
+      category: 'LA ARBOLEDA · LA BARRA DE PONG',
       tone: 'arcane',
       dialog: PADDLE_DIALOG,
-      primary: {
-        label: 'Guardarla',
-        run: () => {
-          markFlag(NATAL_FLAGS.paddle);
-          retroAudio.achievementUnlock();
-          emitParticles(
-            particlesRef.current,
-            ISLA_NATAL_PADDLE_ANCHOR.x,
-            ISLA_NATAL_PADDLE_ANCHOR.y - 18,
-            60,
-            '#e0faff',
-            74,
-            34
-          );
-          setDialogModal(null);
-          showToast('La paleta apunta al sur: el mar ha abierto un carril de luz.');
-        },
-      },
     });
+    showToast('La Barra de Pong quedó en tu inventario. El muelle norte está listo.');
   }, [markFlag, showToast]);
 
   const startDeparture = useCallback(() => {
@@ -702,12 +817,24 @@ export function IslaNatalStage({
 
   const interactDeparture = useCallback(() => {
     const flags = stageRef.current.flagSet;
-    if (!flags.has(NATAL_FLAGS.pongWon) || !flags.has(NATAL_FLAGS.paddle)) {
+    const briefPortHint = (message: string, dialog: IslaNatalDialog) => {
+      const now = performance.now();
+      if (now < portCooldownRef.current) return;
+      portCooldownRef.current = now + 4500;
+      showToast(message);
+      // Mensaje contextual breve: no es una decisión ni bloquea la partida.
       setDialogModal({
         category: 'PUERTO NORTE · EL CARRIL DE LUZ',
         tone: 'wood',
-        dialog: DEPARTURE_BLOCKED_DIALOG,
+        dialog,
       });
+    };
+    if (!flags.has(NATAL_FLAGS.pongWon)) {
+      briefPortHint('Primero debo poner en funcionamiento el Pong.', NATAL_PORT_NEED_PONG_DIALOG);
+      return;
+    }
+    if (!flags.has(NATAL_FLAGS.paddle)) {
+      briefPortHint('Necesito la barra para poder salir a surfear.', NATAL_PORT_NEED_BAR_DIALOG);
       return;
     }
     if (!flags.has(NATAL_FLAGS.backpack)) {
@@ -723,9 +850,9 @@ export function IslaNatalStage({
       });
       return;
     }
-    // La travesía se elige aquí y se ejecuta sola hasta la Isla del Origen.
+    // Sólo la E en el muelle inicia la travesía; nunca es automática.
     startDeparture();
-  }, [startDeparture]);
+  }, [showToast, startDeparture]);
 
   const enterCabin = useCallback(() => {
     const cabin = cabinRef.current;
@@ -754,7 +881,7 @@ export function IslaNatalStage({
     } else if (!flags.has(NATAL_FLAGS.backpack)) {
       showToast('Tu mochila espera colgada junto a la ventana.');
     } else if (flags.has(NATAL_FLAGS.travelerWarning) && !flags.has(NATAL_FLAGS.chestOpened)) {
-      showToast(`El cofre del abuelo aguarda bajo el retrato (código ${ISLA_NATAL_CHEST_CODE}).`);
+      showToast(`El cofre del abuelo aguarda en el comedor de tu casa (código ${ISLA_NATAL_CHEST_CODE}).`);
     } else {
       showToast('El calor del hogar sigue intacto dentro de tu casa.');
     }
@@ -791,6 +918,18 @@ export function IslaNatalStage({
       setTravelerPhase('arrival');
     }
   }, []);
+
+  /** Prólogo: cruzar la puerta principal devuelve al comedor, no al interior antiguo. */
+  const returnToComedor = useCallback(() => {
+    if (!onReturnToComedor || cabinFadeTimerRef.current !== null) return;
+    setCabinFade(true);
+    retroAudio.doorTransition();
+    if (cabinFadeTimerRef.current !== null) window.clearTimeout(cabinFadeTimerRef.current);
+    cabinFadeTimerRef.current = window.setTimeout(() => {
+      cabinFadeTimerRef.current = null;
+      onReturnToComedor();
+    }, 620);
+  }, [onReturnToComedor]);
 
   /** Cruce de puerta con fundido: Pixel ya caminó hasta el umbral. */
   const finishCabinExit = useCallback(() => {
@@ -835,7 +974,7 @@ export function IslaNatalStage({
           const flags = stageRef.current.flagSet;
           if (flags.has(NATAL_FLAGS.travelerWarning) && !flags.has(NATAL_FLAGS.chestOpened)) {
             showToast(
-              `Mochila recogida · Acercate al cofre del abuelo e introducí el código ${ISLA_NATAL_CHEST_CODE}.`
+              `Mochila recogida · El cofre del abuelo espera en el comedor de tu casa. Introducí el código ${ISLA_NATAL_CHEST_CODE}.`
             );
           } else {
             showToast('Mochila al hombro · Bitácora, cantimplora, brújula y cuerda.');
@@ -854,68 +993,100 @@ export function IslaNatalStage({
     });
   }, []);
 
-  const interactChest = useCallback(() => {
-    const flags = stageRef.current.flagSet;
-    if (flags.has(NATAL_FLAGS.chestOpened)) {
-      setDialogModal({
-        category: 'PRADERA DE CASA · EL COFRE DEL ABUELO',
-        tone: 'wood',
-        dialog: NATAL_CHEST_EMPTY_DIALOG,
-      });
-      return;
-    }
-    // El cofre no puede abrirse antes de la cinemática ni antes de recibir el código del enviado del futuro.
-    if (!flags.has(NATAL_FLAGS.travelerWarning)) {
-      setDialogModal({
-        category: 'PRADERA DE CASA · CERRADURA DE LATÓN',
-        tone: 'wood',
-        dialog: NATAL_CHEST_LOCKED_DIALOG,
-      });
-      return;
-    }
-    setDialogModal(null);
-    setChestCode('');
-    setChestCodeError(false);
-    setChestCodeOpen(true);
-    retroAudio.uiClick();
-  }, []);
-
-  const closeChestCode = useCallback(() => {
-    setChestCodeOpen(false);
-    setChestCode('');
-    setChestCodeError(false);
-    retroAudio.uiClick();
-  }, []);
-
-  const submitChestCode = useCallback(() => {
-    if (chestCode.trim() !== ISLA_NATAL_CHEST_CODE) {
-      setChestCodeError(true);
-      retroAudio.npcBlip(0.62);
-      return;
-    }
-    setChestCodeOpen(false);
-    setChestCode('');
-    setChestCodeError(false);
-    markFlag(NATAL_FLAGS.chestOpened);
-    grantInventoryRef.current(['item-palanca-pong', 'item-carta-abuelo', 'item-foto-abuelo']);
-    emitParticles(
-      particlesRef.current,
-      ISLA_NATAL_CABIN.chest.x,
-      ISLA_NATAL_CABIN.chest.y - 8,
-      64,
-      '#ffe7a8',
-      86,
-      42
-    );
-    retroAudio.chestOpen();
-    retroAudio.achievementUnlock();
+  /** Encuentro del prólogo: el enviado espera afuera, bajo la tormenta. */
+  const interactEnvoy = useCallback(() => {
+    const site = ISLA_NATAL_TRAVELER_SITE;
+    retroAudio.npcBlip(0.92);
     setDialogModal({
-      category: 'PRADERA DE CASA · EL COFRE DEL ABUELO',
-      tone: 'wood',
-      dialog: NATAL_CHEST_REVEAL_DIALOG,
-      primary: { label: 'Guardar la carta y el equipo', run: () => setDialogModal(null) },
+      category: 'ISLA NATAL · UNA VOZ DE OTRO TIEMPO',
+      tone: 'arcane',
+      dialog: NATAL_PROLOGUE_ENVOY_DIALOG,
+      lockClose: true,
+      primary: {
+        label: 'Guardar el código',
+        run: () => {
+          markFlag(NATAL_FLAGS.travelerWarning);
+          grantInventoryRef.current(['item-nota-codigo-cofre']);
+          setEnvoyGone(true);
+          // El enviado es el interruptor de la tormenta: la nube empieza a
+          // deshacerse y la isla recupera el día de forma progresiva.
+          stormClearStartRef.current = performance.now();
+          stormCinematicRef.current = true;
+          setStormCinematic(true);
+          retroAudio.timeMachineWarp();
+          window.dispatchEvent(new CustomEvent('pixelverse-shake'));
+          emitParticles(
+            particlesRef.current,
+            site.x,
+            site.y - 8,
+            52,
+            '#cbd5e1',
+            92,
+            30
+          );
+          emitParticles(
+            particlesRef.current,
+            site.x,
+            site.y - 2,
+            24,
+            '#67e8f9',
+            66,
+            18
+          );
+          setDialogModal(null);
+          showToast(
+            `Código ${ISLA_NATAL_CHEST_CODE} anotado. La tormenta se está disipando.`
+          );
+        },
+      },
     });
-  }, [chestCode, markFlag]);
+  }, [markFlag, showToast]);
+
+  /**
+   * Encuentro automático del prólogo. Al cruzar la puerta principal, Pixel ya
+   * está frente al enviado: se detiene, gira hacia él, se sobresalta con un
+   * signo «!» y la conversación se abre sola. Sólo ocurre mientras el aviso del
+   * viajero siga pendiente; al completarse una vez, no vuelve a dispararse.
+   */
+  useEffect(() => {
+    if (!prologueNight) return undefined;
+    if (stageRef.current.flagSet.has(NATAL_FLAGS.travelerWarning)) return undefined;
+    if (stageRef.current.dialogOpen) return undefined;
+    if (stageRef.current.envoyVisible === false) return undefined;
+
+    const player = playerRef.current;
+    clickResetRef.current();
+    player.walking = false;
+    player.sprinting = false;
+    player.facingDir = 'right';
+    envoyLockRef.current = true;
+
+    const lookTimer = window.setTimeout(() => {
+      envoySurpriseRef.current = true;
+      retroAudio.npcBlip(1.2);
+      emitParticles(
+        particlesRef.current,
+        player.x,
+        player.y - 34,
+        16,
+        '#fef9c3',
+        34,
+        24
+      );
+    }, 760);
+    const talkTimer = window.setTimeout(() => {
+      envoySurpriseRef.current = false;
+      envoyLockRef.current = false;
+      interactEnvoy();
+    }, 1760);
+
+    return () => {
+      window.clearTimeout(lookTimer);
+      window.clearTimeout(talkTimer);
+      envoySurpriseRef.current = false;
+      envoyLockRef.current = false;
+    };
+  }, [prologueNight, interactEnvoy]);
 
   const openVista = useCallback(() => {
     // El jugador se detiene frente al catalejo antes de abrir la vista lejana.
@@ -935,7 +1106,16 @@ export function IslaNatalStage({
   const interactPoi = useCallback(
     (poiId: string) => {
       if (poiId === 'puerta-cabana') {
-        enterCabin();
+        const flags = stageRef.current.flagSet;
+        // Mientras la tormenta del prólogo esté en curso, la puerta vuelve al
+        // comedor. Si el cofre aún no se abrió, también: la misión sigue allí.
+        const mustReturnToComedor =
+          prologueNightRef.current ||
+          (!flags.has(NATAL_FLAGS.departed) &&
+            flags.has(NATAL_FLAGS.travelerWarning) &&
+            !flags.has(NATAL_FLAGS.chestOpened));
+        if (mustReturnToComedor) returnToComedor();
+        else enterCabin();
         return;
       }
       // El mirador del Alto de las Rocas abre la vista lejana de la Isla del
@@ -955,7 +1135,7 @@ export function IslaNatalStage({
         dialog: poi.dialog,
       });
     },
-    [enterCabin, openVista]
+    [enterCabin, openVista, returnToComedor]
   );
 
   const handleInteract = useCallback(
@@ -964,16 +1144,16 @@ export function IslaNatalStage({
       else if (target.kind === 'arcade') interactArcade();
       else if (target.kind === 'paddle') interactPaddle();
       else if (target.kind === 'cabin-backpack') takeCabinBackpack();
-      else if (target.kind === 'cabin-chest') interactChest();
       else if (target.kind === 'cabin-radio') interactCabinRadio();
+      else if (target.kind === 'envoy') interactEnvoy();
       else if (target.kind === 'cabin-exit') leaveCabin();
       else interactDeparture();
     },
     [
       interactArcade,
       interactCabinRadio,
-      interactChest,
       interactDeparture,
+      interactEnvoy,
       interactPaddle,
       interactPoi,
       leaveCabin,
@@ -984,6 +1164,9 @@ export function IslaNatalStage({
 
   const handleChallengeVictory = useCallback(
     (arcadePoints: number, rallies: number) => {
+      // La victoria cierra el minijuego y devuelve el control aquí mismo.
+      // No hay pregunta de quedarse ni de viajar: la travesía sólo empieza
+      // cuando el jugador la elige en el muelle con la E.
       setChallengeOpen(false);
       markFlag(NATAL_FLAGS.pongWon);
       markFlag(NATAL_FLAGS.signal);
@@ -999,34 +1182,11 @@ export function IslaNatalStage({
       );
       retroAudio.portalVictory();
       window.dispatchEvent(new CustomEvent('pixelverse-shake'));
-      showToast(`Victoria · ${arcadePoints} PTS en ${rallies} intercambios`);
-      const hasBackpackNow = flagSet.has(NATAL_FLAGS.backpack);
-      if (!hasBackpackNow) {
-        setDialogModal({
-          category: 'LA ARBOLEDA · SEÑAL ENTRANTE',
-          tone: 'arcane',
-          dialog: {
-            title: 'Señal en la pantalla',
-            paragraphs: [
-              'El marcador se queda en 3 y la máquina no vuelve al atractivo: la pantalla se llena de bandas que caen como lluvia.',
-              'Entre la estática se dibuja una silueta enorme —arcos, torres, un cielo roto— y una voz sin boca dice una sola palabra que no llegas a entender.',
-              'Después, silencio. Sobre el cristal queda escrita una dirección que no está en ningún mapa: la Isla del Origen.',
-              'Debería llevar mi mochila con mis objetos. ¡Se encuentra en mi casa, la buscaré!',
-            ],
-            hint: 'Algo se ha despertado muy lejos de aquí… y ha aprendido tu nombre.',
-          },
-          primary: { label: 'Salir a la arboleda', run: () => setDialogModal(null) },
-        });
-        return;
-      }
-      setDialogModal({
-        category: 'LA ARBOLEDA · SEÑAL ENTRANTE',
-        tone: 'arcane',
-        dialog: ARCADE_DIALOG_AFTER_WIN,
-        primary: { label: 'Salir a la arboleda', run: () => setDialogModal(null) },
-      });
+      showToast(
+        `Victoria · ${arcadePoints} PTS en ${rallies} intercambios. La Barra de Pong quedó junto al gabinete.`
+      );
     },
-    [markFlag, showToast, flagSet]
+    [markFlag, showToast]
   );
 
   const handleChallengeQuit = useCallback(() => {
@@ -1040,7 +1200,17 @@ export function IslaNatalStage({
   const arrivalAnnouncedRef = useRef(flagSet.has(NATAL_FLAGS.firstLight));
 
   useEffect(() => {
+    // Prólogo nocturno: la llegada, la radio y la salida ya ocurrieron en el
+    // dormitorio y el comedor. Aquí no se repite ninguna cinemática.
+    if (!prologueNight) return undefined;
+    if (!flagSet.has(NATAL_FLAGS.firstLight)) markFlag(NATAL_FLAGS.firstLight);
+    if (!flagSet.has(NATAL_FLAGS.cabinVisited)) markFlag(NATAL_FLAGS.cabinVisited);
+    return undefined;
+  }, [flagSet, markFlag, prologueNight]);
+
+  useEffect(() => {
     // Partida nueva: la aventura abre dentro de la casa de Pixel escuchando la radio.
+    if (prologueNightRef.current) return undefined;
     if (introInsideCabinRef.current) {
       markFlag(NATAL_FLAGS.firstLight);
       markFlag(NATAL_FLAGS.cabinVisited);
@@ -1277,6 +1447,7 @@ export function IslaNatalStage({
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    const prologue = prologueNightRef.current;
 
     const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     let reducedMotion = motionQuery.matches;
@@ -1477,7 +1648,7 @@ export function IslaNatalStage({
     const paddleTarget: NatalPromptTarget = {
       kind: 'paddle',
       id: 'paddle',
-      label: 'Recoger la paleta',
+      label: 'Recoger la Barra de Pong',
       accentHex: '#e0faff',
       x: ISLA_NATAL_PADDLE_ANCHOR.x,
       y: ISLA_NATAL_PADDLE_ANCHOR.y,
@@ -1495,6 +1666,10 @@ export function IslaNatalStage({
     let last = performance.now();
     let elapsed = 0;
     let wasInCabin = false;
+    // Tormenta nocturna del prólogo: relámpagos, lluvia y estruendos lejanos.
+    let nightStormT = 0;
+    let nightFlash = 0;
+    let nextNightStrike = prologue ? 0.9 : Number.POSITIVE_INFINITY;
 
     const frame = (now: number) => {
       raf = requestAnimationFrame(frame);
@@ -1508,8 +1683,47 @@ export function IslaNatalStage({
         stage.challengeOpen ||
         stage.vistaOpen ||
         stage.codeOpen ||
+        envoyLockRef.current ||
+        stormCinematicRef.current ||
         travelerPhaseRef.current !== 'none';
       const departure = departureRef.current;
+
+      // La tormenta se apaga con una curva suave desde la partida del enviado.
+      let stormFade = 1;
+      if (prologue && stormClearStartRef.current !== null) {
+        const clearK = Math.min(
+          1,
+          Math.max(0, (now - stormClearStartRef.current) / STORM_CLEAR_MS)
+        );
+        const eased = clearK * clearK * (3 - 2 * clearK);
+        stormFade = 1 - eased;
+        if (clearK >= 1 && !stormClearedFiredRef.current) {
+          stormClearedFiredRef.current = true;
+          stormCinematicRef.current = false;
+          setStormCinematic(false);
+          stageRef.current.markFlag(NATAL_FLAGS.stormCleared);
+          retroAudio.zoneChime();
+          stageRef.current.showZoneBanner('pradera-casa', false);
+        }
+      }
+      if (stage.stormCleared) stormFade = 0;
+
+      if (prologue) {
+        nightStormT += dt;
+        nightFlash = Math.max(0, nightFlash - dt * 2.1);
+        if (!modalOpen && !departure && stormFade > 0.2) {
+          nextNightStrike -= dt;
+          if (nextNightStrike <= 0) {
+            nextNightStrike = 5.5 + Math.random() * 6.5;
+            nightFlash = 1;
+            retroAudio.thunderRoll();
+            retroAudio.flashBurst();
+            if (!reducedMotion) {
+              window.dispatchEvent(new CustomEvent('pixelverse-shake'));
+            }
+          }
+        }
+      }
 
       player.interactAnim = Math.max(0, player.interactAnim - dt);
 
@@ -1840,21 +2054,6 @@ export function IslaNatalStage({
           }
           consider(
             {
-              kind: 'cabin-chest',
-              id: 'cabin-chest',
-              label: stage.chestOpened
-                ? 'Revisar el cofre'
-                : stage.chestCodeKnown
-                  ? 'Abrir el cofre'
-                  : 'Examinar el cofre',
-              accentHex: '#facc15',
-              x: ISLA_NATAL_CABIN.chest.x,
-              y: ISLA_NATAL_CABIN.chest.y,
-            },
-            ISLA_NATAL_CABIN.chest.radius
-          );
-          consider(
-            {
               kind: 'cabin-radio',
               id: 'cabin-radio',
               label: 'Examinar la radio',
@@ -1866,11 +2065,13 @@ export function IslaNatalStage({
           );
         } else {
           for (const poi of ISLA_NATAL_POIS) {
+            const prologueDoor =
+              prologueNightRef.current && poi.id === 'puerta-cabana';
             consider(
               {
                 kind: 'poi',
                 id: poi.id,
-                label: poi.label,
+                label: prologueDoor ? 'Entrar a la casa' : poi.label,
                 accentHex: poi.accentHex,
                 x: poi.x,
                 y: poi.y,
@@ -1878,12 +2079,32 @@ export function IslaNatalStage({
               poi.radius
             );
           }
+          if (prologueNightRef.current && stage.envoyVisible) {
+            consider(
+              {
+                kind: 'envoy',
+                id: 'envoy',
+                label: 'Hablar con el enviado',
+                accentHex: '#a5f3fc',
+                x: ISLA_NATAL_TRAVELER_SITE.x,
+                y: ISLA_NATAL_TRAVELER_SITE.y,
+              },
+              96
+            );
+          }
+          arcadeTarget.label =
+            stage.arcadeState === 'won'
+              ? 'Revisar el gabinete'
+              : stage.arcadeState === 'powered'
+                ? 'Presiona E para iniciar Pong'
+                : stage.leverCarried
+                  ? 'Colocar la palanca'
+                  : 'Examinar el gabinete';
           consider(arcadeTarget, ISLA_NATAL_ARCADE_ANCHOR.radius);
           if (stage.paddleOnGround) consider(paddleTarget, ISLA_NATAL_PADDLE_ANCHOR.radius);
-          // Puerto Norte: con la Barra de Pong disponible, la opción de surfear
-          // aparece de forma explícita. Sin la barra, sólo se puede asomarse.
+          // Puerto Norte: la salida sólo se ofrece en el muelle y con todo listo.
           departureTarget.label = stage.departureReady
-            ? 'Surfear hacia Isla Origen'
+            ? 'Presiona E para salir a surfear'
             : 'Asomarse al puerto norte';
           consider(departureTarget, ISLA_NATAL_DEPARTURE.radius);
         }
@@ -1934,7 +2155,6 @@ export function IslaNatalStage({
             appearance: stage.appearance,
             prompt: promptSpec,
             backpackOnHook: !stage.flagSet.has(NATAL_FLAGS.backpack),
-            chestOpened: stage.chestOpened,
             radioOn: phaseNow === 'radio',
             radioStatic: radioStaticNow,
             storm: stormNow,
@@ -1973,6 +2193,15 @@ export function IslaNatalStage({
             prompt: promptSpec,
             shockwaves: waves,
             travelerEvent,
+            envoy:
+              prologue && stage.envoyVisible
+                ? { x: ISLA_NATAL_TRAVELER_SITE.x, y: ISLA_NATAL_TRAVELER_SITE.y }
+                : null,
+            surprise: envoySurpriseRef.current,
+            nightStorm:
+              prologue && stormFade > 0.01
+                ? { t: nightStormT, flash: nightFlash * stormFade, fade: stormFade }
+                : null,
           });
         }
         ctx.restore();
@@ -2048,6 +2277,24 @@ export function IslaNatalStage({
         </div>
       )}
 
+      {/* La desaparición del enviado disipa la tormenta: secuencia sin menús. */}
+      {stormCinematic && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-[20%] z-20 flex justify-center px-5">
+          <div
+            className="glass-hud max-w-md px-5 py-2.5 text-center"
+            style={{ borderColor: '#a5f3fc88' }}
+          >
+            <p className="font-mono text-[11px] sm:text-xs font-bold tracking-[0.22em] uppercase text-cyan-100">
+              La nube negra se deshace
+            </p>
+            <p className="font-ui mt-1 text-[11px] sm:text-xs text-slate-300">
+              La lluvia pierde fuerza y los truenos se alejan. Por primera vez en la noche,
+              la isla vuelve a ver el cielo.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Subtítulo cinematográfico integrado para la secuencia inicial en la casa */}
       {introCaption && !dialogModal && (
         <div className="pointer-events-none absolute inset-x-0 bottom-[7%] z-30 flex justify-center px-4">
@@ -2109,7 +2356,11 @@ export function IslaNatalStage({
             >
               <div className="comic-speaker-tag">
                 <span className="comic-speaker-dot" />
-                {comicSpeaker === 'pixel' ? 'PIXEL' : 'EL VIAJERO'}
+                {comicSpeaker === 'pixel'
+                  ? 'PIXEL'
+                  : comicSpeaker === 'envoy'
+                    ? 'EL ENVIADO'
+                    : 'EL VIAJERO'}
               </div>
               <p className="comic-text">
                 {dialogueLine.text.slice(0, dialogueVisibleChars)}
@@ -2197,99 +2448,6 @@ export function IslaNatalStage({
               )}
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Cerradura del cofre: la combinación que entregó el enviado del futuro */}
-      {chestCodeOpen && (
-        <div className="dialogue-backdrop fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5">
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              submitChestCode();
-            }}
-            className="dialogue-frame dialogue-wood rounded-none w-full max-w-md p-4 sm:p-6 space-y-4 relative"
-          >
-            <div className="flex items-start justify-between gap-3 border-b-2 border-dashed border-white/30 pb-2.5">
-              <div>
-                <p className="dialogue-kicker text-[10px] font-mono tracking-widest uppercase">
-                  Pradera de Casa · Cerradura de latón
-                </p>
-                <h3 className="dialogue-speaker font-mono text-base sm:text-lg font-bold mt-0.5">
-                  El cofre del abuelo
-                </h3>
-                <p className="text-[11px] font-mono text-[#7dd3fc] mt-1">
-                  Cuatro discos numerados · Código recibido: {ISLA_NATAL_CHEST_CODE}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={closeChestCode}
-                aria-label="Cerrar la cerradura"
-                className="text-white hover:text-amber-300 cursor-pointer p-1 font-mono font-bold"
-              >
-                [X]
-              </button>
-            </div>
-
-            <p className="text-xs sm:text-sm font-mono leading-relaxed text-amber-100/90">
-              Los discos giran con un chasquido seco. Introducí el código que te entregó el enviado
-              del futuro ({ISLA_NATAL_CHEST_CODE}) para abrir el cofre de tu abuelo.
-            </p>
-
-            <label className="block">
-              <span className="block text-[10px] font-mono tracking-[0.3em] text-amber-200/80 mb-1.5">
-                COMBINACIÓN
-              </span>
-              <input
-                autoFocus
-                value={chestCode}
-                onChange={(event) => {
-                  setChestCode(event.target.value.replace(/\D/g, '').slice(0, 4));
-                  setChestCodeError(false);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') {
-                    event.preventDefault();
-                    closeChestCode();
-                  }
-                }}
-                inputMode="numeric"
-                autoComplete="off"
-                maxLength={4}
-                aria-label="Combinación del cofre"
-                placeholder="····"
-                className="w-full bg-black/35 border-2 border-amber-300/40 px-3 py-3 text-center font-mono text-3xl tracking-[0.45em] text-amber-100 outline-none focus:border-amber-200"
-                style={{ caretColor: '#fde68a' }}
-              />
-            </label>
-
-            {chestCodeError && (
-              <p role="alert" className="text-[11px] font-mono text-red-300">
-                La cerradura no cede. Esa no es la combinación.
-              </p>
-            )}
-
-            <div className="flex flex-wrap justify-end items-center gap-2 pt-1">
-              <span className="mr-auto font-mono text-[10px] text-slate-400 tracking-widest">
-                [ENTER] ABRIR · [ESC] SALIR
-              </span>
-              <button
-                type="button"
-                onClick={closeChestCode}
-                className="px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-slate-300 hover:text-white cursor-pointer"
-              >
-                Cancelar
-              </button>
-              <button
-                type="submit"
-                disabled={chestCode.length < 4}
-                className="dialogue-action px-4 py-1.5 font-mono font-bold text-xs uppercase tracking-wider cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Abrir cofre
-              </button>
-            </div>
-          </form>
         </div>
       )}
 

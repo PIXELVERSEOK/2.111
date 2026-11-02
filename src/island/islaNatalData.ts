@@ -13,6 +13,8 @@
  * Este módulo es autónomo: no modifica ni depende de los datos de la Isla del Origen.
  */
 
+import { isPointInsideIslandCoast } from './islaNatalCoast';
+
 export const ISLA_NATAL_WORLD_W = 2352;
 export const ISLA_NATAL_WORLD_H = 1736;
 
@@ -120,6 +122,72 @@ export const ISLA_NATAL_WALK_RECTS: IslaNatalWalkRect[] = [
   { id: 'p-anillo-oeste', x: 1000, y: 890, w: 64, h: 210, zone: 'pradera-casa', surface: 'path' },
   { id: 'p-anillo-este', x: 1288, y: 890, w: 64, h: 210, zone: 'pradera-casa', surface: 'path' },
 ];
+
+/**
+ * Banda litoral transitable que sigue la silueta orgánica de la isla. Los rects
+ * anteriores definen el interior jugable; esta franja permite recorrer las nuevas
+ * playas y cabos sin que queden muros invisibles contra el agua. Se mantiene 20 px
+ * dentro de la línea de costa para que el cuerpo de Pixel nunca pise el mar.
+ */
+const ISLA_NATAL_COAST_INSET = 20;
+
+/** Rect sentinela: sólo aporta superficie y zona; la forma la decide la costa. */
+const NATAL_COAST_BAND_RECTS: Record<IslaNatalZoneId, IslaNatalWalkRect> = {
+  'playa-aurora': {
+    id: 'costa-playa-aurora',
+    x: 0,
+    y: 0,
+    w: ISLA_NATAL_WORLD_W,
+    h: ISLA_NATAL_WORLD_H,
+    zone: 'playa-aurora',
+    surface: 'sand',
+  },
+  'mirador-oleaje': {
+    id: 'costa-mirador-oleaje',
+    x: 0,
+    y: 0,
+    w: ISLA_NATAL_WORLD_W,
+    h: ISLA_NATAL_WORLD_H,
+    zone: 'mirador-oleaje',
+    surface: 'sand',
+  },
+  'pradera-casa': {
+    id: 'costa-pradera-casa',
+    x: 0,
+    y: 0,
+    w: ISLA_NATAL_WORLD_W,
+    h: ISLA_NATAL_WORLD_H,
+    zone: 'pradera-casa',
+    surface: 'sand',
+  },
+  'arboleda-arcade': {
+    id: 'costa-arboleda-arcade',
+    x: 0,
+    y: 0,
+    w: ISLA_NATAL_WORLD_W,
+    h: ISLA_NATAL_WORLD_H,
+    zone: 'arboleda-arcade',
+    surface: 'sand',
+  },
+  'alto-rocas': {
+    id: 'costa-alto-rocas',
+    x: 0,
+    y: 0,
+    w: ISLA_NATAL_WORLD_W,
+    h: ISLA_NATAL_WORLD_H,
+    zone: 'alto-rocas',
+    surface: 'sand',
+  },
+};
+
+function natalCoastBandZoneAt(x: number, y: number): IslaNatalZoneId {
+  if (y >= 1200) return x >= 1600 ? 'mirador-oleaje' : 'playa-aurora';
+  if (x >= 1640) return 'mirador-oleaje';
+  if (x >= 1400 && y <= 940) return 'arboleda-arcade';
+  if (x <= 900 && y <= 840) return 'alto-rocas';
+  if (y <= 760) return 'playa-aurora';
+  return 'pradera-casa';
+}
 
 export type IslaNatalPathTextureId =
   | 'terracotta'
@@ -263,6 +331,8 @@ export const ISLA_NATAL_PATH_PLAZAS: IslaNatalPathPlaza[] = [
 export const ISLA_NATAL_SOLIDS: IslaNatalSolidRect[] = [
   { id: 'cabana', x: 596, y: 952, w: 112, h: 94 },
   { id: 'cobertizo', x: 1624, y: 718, w: 146, h: 122 },
+  // Huerta central cerrada: impide caminar sobre los cultivos y el cerco.
+  { id: 'huerta', x: 1040, y: 895, w: 272, h: 200 },
   { id: 'bolo-norte', x: 454, y: 410, w: 64, h: 52 },
   { id: 'bolo-este', x: 702, y: 492, w: 56, h: 48 },
   { id: 'bolo-meseta-sur', x: 514, y: 668, w: 48, h: 42 },
@@ -300,22 +370,16 @@ export const ISLA_NATAL_CABIN = {
   door: { x: 240, y: 282, radius: 46 },
   backpack: { x: 200, y: 104, radius: 56 },
   radio: { x: 363, y: 154, radius: 56 },
-  /**
-   * El cofre del abuelo descansa bajo el retrato familiar. Guarda la palanca
-   * del viejo Pong y la carta que explica el Reinicio Cero.
-   */
-  chest: { x: 282, y: 172, radius: 52 },
   /** Muebles que bloquean el paso dentro de la sala. */
   solids: [
     { id: 'cama', x: 30, y: 150, w: 112, h: 114 },
     { id: 'mesa', x: 318, y: 148, w: 86, h: 58 },
     { id: 'cocina', x: 404, y: 112, w: 64, h: 92 },
-    { id: 'cofre', x: 270, y: 162, w: 24, h: 16 },
   ] as IslaNatalSolidRect[],
 };
 
-/** Combinación grabada en la carta que el viajero entrega en mano. */
-export const ISLA_NATAL_CHEST_CODE = '1972';
+/** Combinación grabada en la carta que el enviado del futuro entrega en mano. */
+export const ISLA_NATAL_CHEST_CODE = '287';
 
 export function isCabinInteriorWalkable(x: number, y: number): boolean {
   if (x < 26 || x > 454 || y < 138 || y > 286) return false;
@@ -335,6 +399,11 @@ export function isIslaNatalPointOnLand(x: number, y: number): IslaNatalWalkRect 
   for (let i = ISLA_NATAL_WALK_RECTS.length - 1; i >= 0; i--) {
     const r = ISLA_NATAL_WALK_RECTS[i];
     if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r;
+  }
+  // Franja litoral: sigue la silueta real de la isla para que las playas nuevas
+  // sean transitables y el límite caminable coincida con la costa dibujada.
+  if (isPointInsideIslandCoast(x, y, ISLA_NATAL_COAST_INSET)) {
+    return NATAL_COAST_BAND_RECTS[natalCoastBandZoneAt(x, y)];
   }
   return null;
 }
@@ -440,6 +509,8 @@ export const ISLA_NATAL_FLAGS = {
   travelerWarning: 'isla-natal-aviso-viajero',
   chestOpened: 'isla-natal-cofre-abierto',
   leverInstalled: 'isla-natal-palanca-instalada',
+  /** La nube negra se disipó con la partida del enviado: ya no vuelve. */
+  stormCleared: 'isla-natal-tormenta-disipada',
 } as const;
 
 /* ------------------------------------------------------------------ */
@@ -460,7 +531,7 @@ export type IslaNatalPoiKind =
   | 'paddle'
   | 'departure';
 
-export type IslaNatalDialogSpeaker = 'pixel' | 'traveler';
+export type IslaNatalDialogSpeaker = 'pixel' | 'traveler' | 'envoy';
 
 export interface IslaNatalDialogLine {
   speaker: IslaNatalDialogSpeaker;
@@ -667,7 +738,7 @@ export const ARCADE_DIALOG_DUSTY: IslaNatalDialog = {
     '«Es tuya —dijo—. Juega. Y no pares hasta ganarme.» Luego se fue hacia el mar y el mar no se lo tragó: simplemente dejó de estar.',
     'En el lateral hay una ranura de hierro, vacía. El gabinete no arranca sin su palanca.',
   ],
-  hint: 'La palanca que falta debe de estar en el cofre del abuelo, dentro de la cabaña.',
+  hint: 'La palanca que falta debe de estar en el cofre del abuelo, en el comedor de tu casa.',
 };
 
 export const ARCADE_DIALOG_MISSING_LEVER: IslaNatalDialog = {
@@ -676,7 +747,7 @@ export const ARCADE_DIALOG_MISSING_LEVER: IslaNatalDialog = {
   paragraphs: [
     'El interruptor baja y vuelve a subir sin resistencia. Falta la palanca que transmite el pulso al tubo.',
     'El abuelo siempre decía que las máquinas viejas no se encienden con electricidad, sino con alguien que recuerde para qué sirven.',
-    'Su cofre sigue bajo el retrato familiar, en la casa de la pradera.',
+    'Su cofre sigue en el comedor de la casa, junto a la mesa donde se sentaba a jugar.',
   ],
   hint: 'Abre el cofre del abuelo con la combinación que te dio el viajero.',
 };
@@ -686,9 +757,15 @@ export const ARCADE_DIALOG_LEVER_READY: IslaNatalDialog = {
   subtitle: 'Cobertizo de la arboleda',
   paragraphs: [
     'La palanca de hierro encaja en la ranura del gabinete como si hubiera sido forjada para ella. El latón todavía conserva el calor de la casa.',
-    'Al empujarla, el mecanismo muerde el aire y el interruptor encuentra su recorrido. La máquina está lista para recibir el pulso.',
+    'Al empujarla, el mecanismo muerde el aire y el interruptor encuentra su recorrido. El tubo de Pong despierta con un zumbido grave.',
   ],
-  hint: 'Instalar la palanca despertará el tubo de Pong.',
+  hint: 'Presiona E para iniciar Pong.',
+  lines: [
+    {
+      speaker: 'pixel',
+      text: '¡Listo! La palanca quedó colocada. Ahora puedo activar el Pong.',
+    },
+  ],
 };
 
 export const ARCADE_DIALOG_POWER_ON: IslaNatalDialog = {
@@ -752,6 +829,29 @@ export const DEPARTURE_BLOCKED_DIALOG: IslaNatalDialog = {
   hint: 'Gana Pong y recoge la barra antes de volver al puerto norte.',
 };
 
+/** Avisos breves del muelle, sin abrir un menú de decisión. */
+export const NATAL_PORT_NEED_PONG_DIALOG: IslaNatalDialog = {
+  title: 'El carril de luz',
+  paragraphs: ['Primero debo poner en funcionamiento el Pong.'],
+  hint: 'La máquina del abuelo espera en la arboleda.',
+};
+
+export const NATAL_PORT_NEED_BAR_DIALOG: IslaNatalDialog = {
+  title: 'El carril de luz',
+  paragraphs: ['Necesito la barra para poder salir a surfear.'],
+  hint: 'La Barra de Pong quedó junto al gabinete, en la arboleda.',
+};
+
+export const NATAL_STORM_CLEAR_DIALOG: IslaNatalDialog = {
+  title: 'El cielo vuelve',
+  subtitle: 'La nube negra se deshace',
+  paragraphs: [
+    'La máquina del enviado se apaga con un chasquido húmedo y su silueta se deshace en partículas azules.',
+    'Sobre el mar, la nube negra empieza a abrirse. La lluvia pierde fuerza, los truenos se alejan y, por primera vez en la noche, la isla vuelve a ver el cielo.',
+  ],
+  hint: 'La tormenta se disipa. Puedes continuar.',
+};
+
 /* ------------------------------------------------------------------ */
 /* EL AVISO DEL VIAJERO                                               */
 /* ------------------------------------------------------------------ */
@@ -779,6 +879,51 @@ export const NATAL_TRAVELER_DIALOG: IslaNatalDialog = {
   hint: `Código del cofre recibido: ${ISLA_NATAL_CHEST_CODE}. Nota de código agregada al inventario (permanente).`,
 };
 
+/**
+ * Encuentro del prólogo, ya fuera de la casa. El enviado entrega el código 287
+ * y se marcha con su máquina del tiempo sin revelar el contenido del cofre.
+ */
+export const NATAL_PROLOGUE_ENVOY_DIALOG: IslaNatalDialog = {
+  title: 'El enviado del futuro',
+  subtitle: 'Lluvia, noche y una voz que llega de otro tiempo',
+  paragraphs: [
+    'Un hombre aguarda bajo la tormenta, con el abrigo empapado y una luz azul temblando a sus pies.',
+    '«¡Por fin! Pensé que no iba a encontrarte. Vengo del futuro. Tu abuelo me envió.»',
+    '«El Reinicio Cero ha comenzado. Tu abuelo dejó algo preparado para ti: el cofre que está dentro de tu casa. Tiene una cerradura de tres cifras.»',
+    '«El código es 287. No lo olvides. Debo irme: regresa a la casa y abre el cofre. No tenemos mucho tiempo.»',
+  ],
+  hint: 'Código del cofre: 287. Regresa a la casa y abre el cofre de tu abuelo.',
+  lines: [
+    { speaker: 'envoy', text: '¡Por fin! Pensé que no iba a encontrarte.' },
+    { speaker: 'pixel', text: '¿Quién eres? ¿Qué haces aquí?' },
+    { speaker: 'envoy', text: 'Vengo del futuro. Tu abuelo me envió.' },
+    { speaker: 'pixel', text: '¿Mi abuelo?' },
+    {
+      speaker: 'envoy',
+      text: 'Él sabía que esta noche llegaría. Me pidió que te encontrara y te entregara un mensaje.',
+    },
+    { speaker: 'pixel', text: '¿Qué está pasando? ¿Qué son esos estruendos?' },
+    {
+      speaker: 'envoy',
+      text: 'El Reinicio Cero ha comenzado. Tu abuelo dejó algo preparado para ti. Debes encontrar el cofre que está dentro de tu casa.',
+    },
+    { speaker: 'pixel', text: '¿El cofre?' },
+    {
+      speaker: 'envoy',
+      text: 'Tiene una cerradura de tres cifras. El código es 287. No lo olvides.',
+    },
+    { speaker: 'pixel', text: '¿Qué hay dentro?' },
+    {
+      speaker: 'envoy',
+      text: 'La respuesta que necesitas para comenzar. Tu abuelo sabía que este momento llegaría.',
+    },
+    {
+      speaker: 'envoy',
+      text: 'Debo irme. Regresa a la casa y abre el cofre. No tenemos mucho tiempo.',
+    },
+  ],
+};
+
 export const NATAL_CABIN_RADIO_SILENT_DIALOG: IslaNatalDialog = {
   title: 'La radio de la mesa',
   subtitle: 'Transmisión interrumpida',
@@ -799,32 +944,17 @@ export const NATAL_NO_BACKPACK_EXIT_DIALOG: IslaNatalDialog = {
 };
 
 /* ------------------------------------------------------------------ */
-/* EL COFRE DEL ABUELO                                                */
+/* LA CARTA DEL ABUELO                                                */
 /* ------------------------------------------------------------------ */
 
-export const NATAL_CHEST_LOCKED_DIALOG: IslaNatalDialog = {
-  title: 'El cofre del abuelo',
-  subtitle: 'Bajo el retrato familiar',
-  paragraphs: [
-    'Un cofre de madera oscura y herrajes de latón, más viejo que la casa. La cerradura tiene cuatro discos numerados y ningún signo de haber sido forzada.',
-    'El abuelo lo dejó aquí antes de irse. Nunca me dijo qué guardaba, sólo que lo abriría cuando llegara el momento.',
-  ],
-  hint: 'Necesito el código para abrirlo (puedes consultarlo en la «Nota código cofre» de tu inventario).',
-};
-
-export const NATAL_CHEST_NEEDS_BACKPACK_DIALOG: IslaNatalDialog = {
-  title: 'El cofre del abuelo',
-  subtitle: 'Preparativos antes de abrirlo',
-  paragraphs: [
-    'Tenés en la mano el código para abrir el cofre.',
-    'Antes de sacar lo que dejó tu abuelo, recogé tu mochila colgada junto a la ventana para poder llevar todo con vos.',
-  ],
-  hint: 'Recoge primero tu mochila junto a la ventana.',
-};
-
+/**
+ * Texto completo de la carta guardada en el cofre del comedor. Se conserva
+ * aquí para el bloque narrativo que leerá la carta; el cofre se abre en la
+ * escena del comedor y no en la antigua cabaña.
+ */
 export const NATAL_CHEST_REVEAL_DIALOG: IslaNatalDialog = {
   title: 'La carta del abuelo',
-  subtitle: 'Cofre abierto · Bajo el retrato',
+  subtitle: 'Cofre abierto · El comedor',
   paragraphs: [
     'La tapa cede con un chasquido de latón. Adentro, envueltos en un paño de terciopelo, esperan una palanca de hierro, una fotografía antigua y una carta doblada tres veces.',
     '«Si estás leyendo esto, el Reinicio Cero ya empezó. No fue una tormenta ni una guerra: fue el día en que el mundo dejó de recordar. Las memorias que la humanidad guardó en sus juegos empezaron a borrarse, una por una, y con ellas se fue todo lo que éramos.',
@@ -833,16 +963,6 @@ export const NATAL_CHEST_REVEAL_DIALOG: IslaNatalDialog = {
     'La palanca, la carta y la fotografía ya son tuyas. Lleva la palanca al gabinete de la arboleda e instálala: sin ella, la máquina no volverá a encenderse.',
   ],
   hint: 'Objetos obtenidos: Palanca de Pong, Carta del Abuelo y Fotografía del Abuelo.',
-};
-
-export const NATAL_CHEST_EMPTY_DIALOG: IslaNatalDialog = {
-  title: 'El cofre abierto',
-  subtitle: 'Bajo el retrato familiar',
-  paragraphs: [
-    'El terciopelo conserva la huella de la palanca, la carta y la fotografía. El cofre ya cumplió su parte.',
-    'La combinación 1972 sigue grabada en el disco de latón. El abuelo eligió bien el año.',
-  ],
-  hint: 'Lo que el abuelo guardó ya está contigo.',
 };
 
 /* ------------------------------------------------------------------ */
@@ -935,6 +1055,14 @@ export const ISLA_NATAL_PALMS: DecorPoint[] = [
   { x: 1690, y: 1180, seed: 0.51 },
   { x: 1710, y: 1162, seed: 0.74 },
   { x: 1728, y: 1176, seed: 0.97 },
+
+  // Palmeras de pradera: rompen la línea costera y acompañan la casa y la arboleda.
+  { x: 566, y: 1074, seed: 0.44 },
+  { x: 936, y: 1140, seed: 0.67 },
+  { x: 1070, y: 1162, seed: 0.31 },
+  { x: 1498, y: 1132, seed: 0.76 },
+  { x: 1628, y: 1088, seed: 0.53 },
+  { x: 1748, y: 982, seed: 0.02 },
 ];
 
 /**
@@ -959,42 +1087,213 @@ export interface IslaNatalTreeSpec {
   x: number;
   y: number;
   variant: 'forest' | 'meadow' | 'pine';
+  /** Multiplicador opcional para robles centenarios (referencia: árbol gigante del este). */
+  scale?: number;
+}
+
+/* ------------------- BOSQUE ORGÁNICO DE ISLA NATAL ------------------ */
+
+/** Generador determinista (mulberry32): el bosque es idéntico en cada partida. */
+function natalTreeRand(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function distanceToSegmentSq(
+  x: number,
+  y: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const l2 = dx * dx + dy * dy;
+  if (l2 === 0) return (x - ax) * (x - ax) + (y - ay) * (y - ay);
+  let t = ((x - ax) * dx + (y - ay) * dy) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx;
+  const cy = ay + t * dy;
+  return (x - cx) * (x - cx) + (y - cy) * (y - cy);
+}
+
+/** Holgura libre (px) hasta el borde de cualquier sendero o glorieta. */
+function natalPathClearance(x: number, y: number): number {
+  let clearance = Infinity;
+  for (const route of ISLA_NATAL_PATH_ROUTES) {
+    const halfWidth = route.width * 0.5;
+    for (let i = 0; i < route.points.length - 1; i++) {
+      const [ax, ay] = route.points[i];
+      const [bx, by] = route.points[i + 1];
+      clearance = Math.min(clearance, Math.sqrt(distanceToSegmentSq(x, y, ax, ay, bx, by)) - halfWidth);
+    }
+  }
+  for (const plaza of ISLA_NATAL_PATH_PLAZAS) {
+    const nx = (x - plaza.x) / (plaza.rx + 12);
+    const ny = (y - plaza.y) / (plaza.ry + 12);
+    const norm = Math.hypot(nx, ny) - 1;
+    clearance = Math.min(clearance, norm * Math.min(plaza.rx, plaza.ry));
+  }
+  return clearance;
+}
+
+/**
+ * Zonas de exclusión: accesos, puertas, carteles, objetos interactivos y
+ * puntos de escena. Evita que el dosel tape rutas o interacciones.
+ */
+const NATAL_TREE_KEEPOUTS: { x: number; y: number; r: number }[] = [
+  { x: 652, y: 999, r: 74 }, // cabaña / umbral
+  { x: 1697, y: 779, r: 96 }, // cobertizo de Pong
+  { x: 1176, y: 995, r: 150 }, // huerta, pozo y crucero
+  { x: 1176, y: 676, r: 78 }, // muelle del Puerto Norte
+  { x: 1176, y: 730, r: 58 }, // llegada desde el puerto
+  { x: 1697, y: 868, r: 62 }, // plaza del arcade
+  { x: 1757, y: 870, r: 54 }, // paleta en el suelo
+  { x: 910, y: 1084, r: 112 }, // aterrizaje del viajero
+  { x: 1176, y: 1368, r: 96 }, // llegada a la playa
+  { x: 742, y: 1050, r: 54 }, // buzón
+  { x: 1246, y: 1324, r: 46 }, // cartel de la playa
+  { x: 1036, y: 1340, r: 44 }, // red de pesca
+  { x: 1664, y: 1184, r: 46 }, // mirador del oleaje
+];
+
+for (const sign of ISLA_NATAL_SIGNS) {
+  NATAL_TREE_KEEPOUTS.push({ x: sign.x, y: sign.y, r: 34 });
+}
+for (const poi of ISLA_NATAL_POIS) {
+  NATAL_TREE_KEEPOUTS.push({ x: poi.x, y: poi.y, r: 40 });
+}
+
+function natalTreeSpotAllowed(x: number, y: number): boolean {
+  const rect = isIslaNatalPointOnLand(x, y);
+  // La cantera permanece despejada: sólo pradera y arboleda aceptan árboles.
+  if (!rect || rect.surface !== 'grass') return false;
+  if (isIslaNatalPointBlockedBySolid(x, y)) return false;
+  if (natalPathClearance(x, y) < 16) return false;
+  for (const keep of NATAL_TREE_KEEPOUTS) {
+    const dx = x - keep.x;
+    const dy = y - keep.y;
+    if (dx * dx + dy * dy < keep.r * keep.r) return false;
+  }
+  return true;
+}
+
+interface NatalTreeClusterSpec {
+  cx: number;
+  cy: number;
+  rx: number;
+  ry: number;
+  count: number;
+  variant?: 'forest' | 'meadow' | 'pine';
+  minGap?: number;
+}
+
+/**
+ * Reparto calcado a la referencia: un dosel continuo en el noreste y el este
+ * (alrededor de la arboleda), copas sueltas junto a la cabaña y claros hacia
+ * el sur, donde mandan las palmeras de la costa.
+ */
+const NATAL_TREE_CLUSTERS: NatalTreeClusterSpec[] = [
+  // Dosel norte: enmarca el puerto y se espesa hacia el este.
+  { cx: 1376, cy: 718, rx: 88, ry: 38, count: 6, variant: 'meadow', minGap: 34 },
+  { cx: 1498, cy: 692, rx: 86, ry: 44, count: 9, minGap: 30 },
+  { cx: 1608, cy: 674, rx: 92, ry: 50, count: 14, minGap: 26 },
+  { cx: 1738, cy: 674, rx: 92, ry: 50, count: 14, minGap: 26 },
+  { cx: 1858, cy: 714, rx: 64, ry: 58, count: 11, minGap: 26 },
+  // Arboleda oriental: dosel tupido alrededor del cobertizo de Pong.
+  { cx: 1606, cy: 832, rx: 62, ry: 46, count: 7, minGap: 28 },
+  { cx: 1778, cy: 928, rx: 86, ry: 66, count: 12, minGap: 27 },
+  { cx: 1886, cy: 856, rx: 42, ry: 82, count: 9, minGap: 27 },
+  { cx: 1852, cy: 1040, rx: 58, ry: 62, count: 7, minGap: 28 },
+  // Laderas del poniente: robles sueltos que enmarcan el tejado rojo.
+  { cx: 552, cy: 892, rx: 54, ry: 36, count: 3, variant: 'meadow', minGap: 34 },
+  { cx: 510, cy: 1004, rx: 40, ry: 46, count: 2, variant: 'meadow', minGap: 36 },
+  { cx: 636, cy: 862, rx: 40, ry: 26, count: 2, variant: 'meadow', minGap: 36 },
+  // Árboles sueltos que cierran la composición sur y el costado oeste del puerto.
+  { cx: 1062, cy: 716, rx: 32, ry: 26, count: 3, variant: 'meadow', minGap: 32 },
+  { cx: 836, cy: 1200, rx: 38, ry: 24, count: 2, variant: 'meadow', minGap: 38 },
+  { cx: 1452, cy: 1198, rx: 42, ry: 24, count: 2, variant: 'meadow', minGap: 38 },
+  { cx: 1868, cy: 1080, rx: 30, ry: 32, count: 3, minGap: 30 },
+  // Copas medianas que enmarcan los bordes de los senderos sin invadirlos:
+  // el claro de la casa, el crucero de la huerta y el ramal del mirador.
+  { cx: 792, cy: 1106, rx: 26, ry: 16, count: 2, variant: 'meadow', minGap: 30 },
+  { cx: 934, cy: 1064, rx: 26, ry: 18, count: 2, variant: 'meadow', minGap: 30 },
+  { cx: 1452, cy: 844, rx: 24, ry: 14, count: 2, variant: 'meadow', minGap: 30 },
+  { cx: 1592, cy: 1074, rx: 26, ry: 18, count: 2, variant: 'meadow', minGap: 32 },
+];
+
+/** Robles centenarios: hitos visuales del mapa, como en la referencia. */
+const NATAL_GIANT_TREES: IslaNatalTreeSpec[] = [
+  { x: 1812, y: 862, variant: 'forest', scale: 1.95 },
+  { x: 1598, y: 644, variant: 'pine', scale: 1.85 },
+  { x: 1886, y: 972, variant: 'forest', scale: 1.55 },
+];
+
+function buildNatalTrees(): IslaNatalTreeSpec[] {
+  const rand = natalTreeRand(0x1a7a1207);
+  const trees: IslaNatalTreeSpec[] = [];
+  const trunkPositions: { x: number; y: number }[] = [];
+
+  for (const cluster of NATAL_TREE_CLUSTERS) {
+    const minGap = cluster.minGap ?? 28;
+    let placed = 0;
+    let tries = 0;
+    while (placed < cluster.count && tries < cluster.count * 60) {
+      tries++;
+      // Muestreo elíptico con sesgo al centro: grupos compactos y copas fundidas.
+      const angle = rand() * Math.PI * 2;
+      const radius = Math.sqrt(rand());
+      const x = cluster.cx + Math.cos(angle) * cluster.rx * radius;
+      const y = cluster.cy + Math.sin(angle) * cluster.ry * radius;
+      if (!natalTreeSpotAllowed(x, y)) continue;
+      let tooClose = false;
+      for (const p of trunkPositions) {
+        const dx = x - p.x;
+        const dy = y - p.y;
+        if (dx * dx + dy * dy < minGap * minGap) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+      const roll = rand();
+      const variant =
+        cluster.variant ??
+        (roll > 0.88 ? 'pine' : roll > 0.7 ? 'meadow' : 'forest');
+      trunkPositions.push({ x, y });
+      trees.push({
+        x: Math.round(x),
+        y: Math.round(y),
+        variant,
+        scale: 0.82 + rand() * 0.42,
+      });
+      placed++;
+    }
+  }
+
+  for (const giant of NATAL_GIANT_TREES) {
+    if (!natalTreeSpotAllowed(giant.x, giant.y)) continue;
+    trunkPositions.push({ x: giant.x, y: giant.y });
+    trees.push(giant);
+  }
+
+  return trees.sort((a, b) => a.y - b.y);
 }
 
 /**
  * Árboles de Isla Natal:
- * - Zona 3 (Bosque Este y Noreste): 68+ árboles formando un dosel continuo e impenetrable.
- * - Zona 5 (Farmland Suroeste): Solo 3 árboles frutales dispersos cerca de la cabaña.
+ * - Dosel orgánico del este/noreste con copas de tamaños y tonos variados.
+ * - Robles sueltos junto a la cabaña y tres árboles centenarios como hitos.
+ * - Sin retícula: cada grupo usa dispersión elíptica sembrada.
  */
-export const ISLA_NATAL_TREES: IslaNatalTreeSpec[] = [
-  // --- ZONA 3: BOSQUE ESTE Y NORESTE (Densidad extrema) ---
-  { x: 1550, y: 650, variant: 'forest' }, { x: 1580, y: 640, variant: 'forest' }, { x: 1610, y: 635, variant: 'forest' },
-  { x: 1640, y: 642, variant: 'forest' }, { x: 1670, y: 652, variant: 'forest' }, { x: 1700, y: 645, variant: 'forest' },
-  { x: 1730, y: 640, variant: 'forest' }, { x: 1760, y: 648, variant: 'forest' }, { x: 1790, y: 655, variant: 'forest' },
-  { x: 1820, y: 665, variant: 'forest' }, { x: 1850, y: 680, variant: 'forest' }, { x: 1880, y: 700, variant: 'forest' },
-  { x: 1530, y: 690, variant: 'forest' }, { x: 1560, y: 680, variant: 'forest' }, { x: 1590, y: 675, variant: 'forest' },
-  { x: 1620, y: 685, variant: 'forest' }, { x: 1650, y: 695, variant: 'forest' }, { x: 1680, y: 688, variant: 'forest' },
-  { x: 1710, y: 682, variant: 'forest' }, { x: 1740, y: 688, variant: 'forest' }, { x: 1770, y: 695, variant: 'forest' },
-  { x: 1800, y: 705, variant: 'forest' }, { x: 1830, y: 720, variant: 'forest' }, { x: 1860, y: 740, variant: 'forest' },
-  { x: 1520, y: 730, variant: 'forest' }, { x: 1550, y: 720, variant: 'forest' }, { x: 1580, y: 715, variant: 'forest' },
-  { x: 1610, y: 725, variant: 'forest' }, { x: 1640, y: 718, variant: 'forest' }, { x: 1670, y: 716, variant: 'forest' },
-  { x: 1700, y: 718, variant: 'forest' }, { x: 1730, y: 724, variant: 'forest' }, { x: 1760, y: 732, variant: 'forest' },
-  { x: 1790, y: 742, variant: 'forest' }, { x: 1820, y: 755, variant: 'forest' }, { x: 1850, y: 770, variant: 'forest' },
-  { x: 1880, y: 790, variant: 'forest' }, { x: 1540, y: 770, variant: 'forest' }, { x: 1570, y: 760, variant: 'forest' },
-  { x: 1600, y: 754, variant: 'forest' }, { x: 1750, y: 768, variant: 'forest' }, { x: 1780, y: 775, variant: 'forest' },
-  { x: 1810, y: 785, variant: 'forest' }, { x: 1840, y: 800, variant: 'forest' }, { x: 1870, y: 820, variant: 'forest' },
-  { x: 1530, y: 810, variant: 'forest' }, { x: 1560, y: 800, variant: 'forest' }, { x: 1590, y: 788, variant: 'forest' },
-  { x: 1775, y: 792, variant: 'forest' }, { x: 1805, y: 804, variant: 'forest' }, { x: 1835, y: 818, variant: 'forest' },
-  { x: 1865, y: 835, variant: 'forest' }, { x: 1895, y: 860, variant: 'forest' }, { x: 1535, y: 840, variant: 'forest' },
-  { x: 1565, y: 830, variant: 'forest' }, { x: 1595, y: 820, variant: 'forest' }, { x: 1780, y: 832, variant: 'forest' },
-  { x: 1810, y: 842, variant: 'forest' }, { x: 1840, y: 856, variant: 'forest' }, { x: 1870, y: 872, variant: 'forest' },
-  { x: 1900, y: 890, variant: 'forest' }, { x: 1555, y: 868, variant: 'forest' }, { x: 1585, y: 860, variant: 'forest' },
-  { x: 1615, y: 855, variant: 'forest' }, { x: 1765, y: 868, variant: 'forest' }, { x: 1795, y: 878, variant: 'forest' },
-  { x: 1825, y: 892, variant: 'forest' }, { x: 1855, y: 910, variant: 'forest' }, { x: 1885, y: 930, variant: 'forest' },
-
-  // --- ZONA 5: HUERTA/FARMLAND (Reubicación mejorada según referencia) ---
-  { x: 560, y: 920, variant: 'meadow' },
-];
+export const ISLA_NATAL_TREES: IslaNatalTreeSpec[] = buildNatalTrees();
 
 
 export type IslaNatalClutterKind = 'mushroom' | 'log' | 'stump' | 'debris' | 'fern' | 'flower-cluster' | 'well' | 'campfire' | 'crate' | 'barrel';
@@ -1025,6 +1324,26 @@ export const ISLA_NATAL_CLUTTER: IslaNatalClutter[] = [
 
 
 
+/**
+ * Comprueba que un punto esté bien adentro del césped: las matas y flores
+ * nunca quedan colgando sobre la arena ni sobre los senderos.
+ */
+function isDeepGrass(x: number, y: number): boolean {
+  const probe = 22;
+  const probes: [number, number][] = [
+    [0, 0],
+    [probe, 0],
+    [-probe, 0],
+    [0, probe],
+    [0, -probe],
+  ];
+  for (const [dx, dy] of probes) {
+    const r = isIslaNatalPointOnLand(x + dx, y + dy);
+    if (!r || r.surface !== 'grass') return false;
+  }
+  return true;
+}
+
 /** Dispersión sembrada de matas, flores y guijarros dentro de la tierra útil. */
 function scatter(
   count: number,
@@ -1033,12 +1352,13 @@ function scatter(
 ): DecorPoint[] {
   const out: DecorPoint[] = [];
   let guard = 0;
-  while (out.length < count && guard < count * 45) {
+  while (out.length < count && guard < count * 60) {
     guard++;
-    const x = 340 + hash2(guard, salt) * (ISLA_NATAL_WORLD_W - 680);
-    const y = 330 + hash2(guard + 7919, salt + 13) * (ISLA_NATAL_WORLD_H - 620);
+    const x = 360 + hash2(guard, salt) * (ISLA_NATAL_WORLD_W - 720);
+    const y = 350 + hash2(guard + 7919, salt + 13) * (ISLA_NATAL_WORLD_H - 660);
     const rect = isIslaNatalPointOnLand(x, y);
     if (!rect || !surfaces.includes(rect.surface)) continue;
+    if (rect.surface === 'grass' && !isDeepGrass(x, y)) continue;
     if (isIslaNatalPointBlockedBySolid(x, y)) continue;
     if (Math.abs(x - ISLA_NATAL_SPAWN.x) < 92 && Math.abs(y - ISLA_NATAL_SPAWN.y) < 92) continue;
     out.push({ x: Math.round(x), y: Math.round(y), seed: hash2(guard + 104729, salt + 71) });
@@ -1046,7 +1366,104 @@ function scatter(
   return out;
 }
 
-export const ISLA_NATAL_TUFTS: DecorPoint[] = scatter(340, ['grass'], 11);
-export const ISLA_NATAL_FLOWERS: DecorPoint[] = scatter(118, ['grass'], 29);
+/**
+ * Manchas de flores silvestres: núcleos compactos de 6 a 12 flores, como los
+ * rodales de la referencia, siempre sobre césped profundo.
+ */
+function scatterFlowerClumps(salt: number): DecorPoint[] {
+  const rand = natalTreeRand(salt);
+  const clumps: [number, number, number, number][] = [
+    [880, 1002, 44, 11],
+    [784, 924, 34, 8],
+    [1000, 872, 30, 7],
+    [1120, 1148, 42, 10],
+    [1272, 900, 36, 8],
+    [1416, 1044, 46, 11],
+    [1186, 1168, 38, 9],
+    [1660, 1080, 40, 9],
+    [1480, 846, 30, 7],
+    [740, 1160, 38, 9],
+    [956, 760, 28, 6],
+    [1330, 760, 28, 6],
+  ];
+  const out: DecorPoint[] = [];
+  for (const [cx, cy, radius, count] of clumps) {
+    let placed = 0;
+    let tries = 0;
+    while (placed < count && tries < count * 16) {
+      tries++;
+      const angle = rand() * Math.PI * 2;
+      const dist = Math.sqrt(rand()) * radius;
+      const x = cx + Math.cos(angle) * dist;
+      const y = cy + Math.sin(angle) * dist;
+      if (!isDeepGrass(x, y)) continue;
+      if (isIslaNatalPointBlockedBySolid(x, y)) continue;
+      out.push({ x: Math.round(x), y: Math.round(y), seed: rand() });
+      placed++;
+    }
+  }
+  return out;
+}
+
+/**
+ * Floraciones de borde: pequeños rodales irregulares pegados a los márgenes de
+ * los senderos. Nunca invaden la calzada y se separan del césped profundo para
+ * que la transición camino/pradera se lea de forma natural.
+ */
+function scatterPathEdgeFlowers(salt: number): DecorPoint[] {
+  const rand = natalTreeRand(salt);
+  const out: DecorPoint[] = [];
+  const edgeIsGrass = (x: number, y: number): boolean => {
+    const center = isIslaNatalPointOnLand(x, y);
+    if (!center || center.surface !== 'grass') return false;
+    for (const [dx, dy] of [
+      [6, 0],
+      [-6, 0],
+      [0, 6],
+      [0, -6],
+    ]) {
+      const probe = isIslaNatalPointOnLand(x + dx, y + dy);
+      if (!probe || probe.surface !== 'grass') return false;
+    }
+    if (isIslaNatalPointBlockedBySolid(x, y)) return false;
+    if (isIslaNatalPointOnPath(x, y)) return false;
+    return natalPathClearance(x, y) >= 4;
+  };
+  for (const route of ISLA_NATAL_PATH_ROUTES) {
+    for (let i = 0; i < route.points.length - 1; i++) {
+      const [ax, ay] = route.points[i];
+      const [bx, by] = route.points[i + 1];
+      const segLen = Math.hypot(bx - ax, by - ay);
+      if (segLen < 40) continue;
+      const nx = -(by - ay) / segLen;
+      const ny = (bx - ax) / segLen;
+      let t = 16 + rand() * 30;
+      while (t < segLen - 14) {
+        if (rand() < 0.62) {
+          const side = rand() < 0.5 ? -1 : 1;
+          const offset = route.width * 0.5 + 7 + rand() * 11;
+          const cx = ax + ((bx - ax) * t) / segLen + nx * offset * side;
+          const cy = ay + ((by - ay) * t) / segLen + ny * offset * side;
+          const count = 2 + Math.floor(rand() * 3);
+          for (let k = 0; k < count; k++) {
+            const fx = cx + (rand() - 0.5) * 15;
+            const fy = cy + (rand() - 0.5) * 9;
+            if (!edgeIsGrass(fx, fy)) continue;
+            out.push({ x: Math.round(fx), y: Math.round(fy), seed: rand() });
+          }
+        }
+        t += 24 + rand() * 32;
+      }
+    }
+  }
+  return out;
+}
+
+export const ISLA_NATAL_TUFTS: DecorPoint[] = scatter(560, ['grass'], 11);
+export const ISLA_NATAL_FLOWERS: DecorPoint[] = [
+  ...scatter(100, ['grass'], 29),
+  ...scatterFlowerClumps(0x7f10a3c5),
+  ...scatterPathEdgeFlowers(0x2c9e5a71),
+];
 export const ISLA_NATAL_PEBBLES: DecorPoint[] = scatter(165, ['sand', 'rock'], 47);
 export const ISLA_NATAL_SHELLS: DecorPoint[] = scatter(52, ['sand'], 83);

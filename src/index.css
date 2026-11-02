@@ -975,11 +975,43 @@ button:focus-visible {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: min(100vw, calc(100vh * 16 / 9));
-  height: min(100vh, calc(100vw * 9 / 16));
+  width: min(100vw, calc(100vh * 4 / 3));
+  height: min(100vh, calc(100vw * 3 / 4));
   transform: translate(-50%, -50%);
   image-rendering: pixelated;
   display: block;
+  box-shadow: 0 0 90px rgba(0, 0, 0, 0.82);
+}
+
+/* Rótulo de escena: integrado en la esquina del encuadre 4:3. */
+.cr-scene-tag {
+  position: absolute;
+  top: clamp(16px, 4vh, 42px);
+  left: calc(50% - min(50vw, 66.6667vh) + clamp(18px, 2.8vw, 44px));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: clamp(8px, 0.95vw, 11px);
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.95);
+}
+
+.cr-scene-tag__index {
+  color: #fde047;
+  font-weight: 700;
+}
+
+.cr-scene-tag__rule {
+  width: clamp(16px, 2.6vw, 40px);
+  height: 1px;
+  background: linear-gradient(90deg, rgba(253, 224, 71, 0.85), rgba(253, 224, 71, 0));
+}
+
+.cr-scene-tag__label {
+  color: rgba(226, 247, 255, 0.82);
 }
 
 /* Salvapantallas de tubo: líneas apenas visibles y respiración del fósforo. */
@@ -1154,6 +1186,31 @@ button:focus-visible {
   text-shadow:
     0 2px 12px rgba(0, 0, 0, 0.96),
     0 0 26px rgba(210, 42, 32, 0.42);
+}
+
+/* La época dorada: ámbar cálido de sala de arcade. */
+.cr-subtitle--warm .cr-subtitle__text {
+  color: #fff5e2;
+  text-shadow:
+    0 2px 12px rgba(0, 0, 0, 0.96),
+    0 0 26px rgba(255, 176, 64, 0.34);
+}
+
+/* El reinicio y su ruptura: filo eléctrico. */
+.cr-subtitle--epic .cr-subtitle__text {
+  color: #eefcff;
+  letter-spacing: 0.055em;
+  text-shadow:
+    0 2px 14px rgba(0, 0, 0, 0.96),
+    0 0 30px rgba(0, 216, 255, 0.5);
+}
+
+/* El universo alterado: frío, lejano, casi susurrado. */
+.cr-subtitle--cold .cr-subtitle__text {
+  color: #e3f2ff;
+  text-shadow:
+    0 2px 12px rgba(0, 0, 0, 0.96),
+    0 0 26px rgba(120, 178, 255, 0.36);
 }
 
 @keyframes crSubtitleIn {
@@ -2454,5 +2511,992 @@ button:focus-visible {
   .settings-switch__thumb,
   .settings-done {
     transition: none !important;
+  }
+}
+
+/* =========================================================
+   PRÓLOGO · EL DESPERTAR — HABITACIÓN DE PIXEL
+   Escena jugable que continúa la cinemática de apertura.
+   Todo el dibujo vive en el lienzo; estas capas sólo
+   acompañan con tipografía, prompts y controles.
+   ========================================================= */
+.bedroom-stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #04060c;
+  color: #e6f1ff;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.bedroom-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Humedad de la tormenta: viñeta y líneas de tubo apenas visibles. */
+.bedroom-atmosphere {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 50% 48%, transparent 56%, rgba(0, 0, 0, 0.5) 100%),
+    repeating-linear-gradient(
+      180deg,
+      rgba(0, 0, 0, 0.1) 0px,
+      rgba(0, 0, 0, 0.1) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    linear-gradient(180deg, rgba(8, 14, 30, 0.2) 0%, transparent 22%, transparent 78%, rgba(3, 5, 12, 0.34) 100%);
+  mix-blend-mode: multiply;
+  opacity: 0.78;
+}
+
+/* Barras de cine: se abren al entrar en control. */
+.bedroom-letterbox {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.bedroom-letterbox__bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 7.4%;
+  background: #000;
+  transition: transform 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: 0 0 22px rgba(0, 0, 0, 0.9);
+}
+
+.bedroom-letterbox__bar--top {
+  top: 0;
+  transform: translateY(-101%);
+}
+
+.bedroom-letterbox__bar--bottom {
+  bottom: 0;
+  transform: translateY(101%);
+}
+
+.bedroom-letterbox.is-open .bedroom-letterbox__bar--top,
+.bedroom-letterbox.is-open .bedroom-letterbox__bar--bottom {
+  transform: translateY(0);
+}
+
+/* Rótulo de acto, integrado al encuadre. */
+.bedroom-tag {
+  position: absolute;
+  top: clamp(16px, 4.4vh, 46px);
+  left: clamp(18px, 4vw, 54px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+  z-index: 6;
+  font-family: var(--font-mono);
+  font-size: clamp(8px, 0.94vw, 11px);
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.95);
+  transition: opacity 0.5s ease;
+}
+
+.bedroom-tag__index {
+  color: #fde047;
+  font-weight: 700;
+}
+
+.bedroom-tag__rule {
+  width: clamp(16px, 2.6vw, 40px);
+  height: 1px;
+  background: linear-gradient(90deg, rgba(253, 224, 71, 0.85), rgba(253, 224, 71, 0));
+}
+
+.bedroom-tag__label {
+  color: rgba(226, 247, 255, 0.8);
+}
+
+/* Línea de pensamiento de Pixel. */
+.bedroom-story-line {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(58px, 13vh, 128px);
+  transform: translateX(-50%);
+  z-index: 6;
+  width: max-content;
+  max-width: min(88vw, 780px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  pointer-events: none;
+  animation: bedroomLineIn 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.bedroom-story-line__name {
+  font-family: var(--font-mono);
+  font-size: clamp(8px, 0.9vw, 10px);
+  letter-spacing: 0.44em;
+  color: #fde047;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.95);
+}
+
+.bedroom-story-line__text {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(17px, 2.2vw, 27px);
+  font-weight: 500;
+  line-height: 1.35;
+  color: #eef8ff;
+  text-align: center;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.95), 0 0 26px rgba(88, 146, 255, 0.2);
+}
+
+.bedroom-caret {
+  display: inline-block;
+  width: 0.52em;
+  height: 1.02em;
+  margin-left: 0.12em;
+  vertical-align: -0.12em;
+  background: rgba(238, 248, 255, 0.8);
+  animation: bedroomCaret 0.85s steps(1, end) infinite;
+}
+
+/* Prompt de interacción junto al objeto. */
+.bedroom-prompt {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(74px, 15vh, 150px);
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 15px 8px 9px;
+  border: 1px solid rgba(173, 214, 255, 0.28);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(10, 20, 40, 0.86), rgba(4, 9, 20, 0.9));
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-family: var(--font-sans);
+  font-size: clamp(11px, 1.15vw, 14px);
+  letter-spacing: 0.03em;
+  color: #dcecff;
+  pointer-events: none;
+  animation: bedroomPromptIn 0.28s ease-out both;
+}
+
+.bedroom-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 7px;
+  border: 1px solid rgba(253, 224, 71, 0.55);
+  background: linear-gradient(180deg, rgba(253, 224, 71, 0.22), rgba(253, 224, 71, 0.08));
+  color: #fde047;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* Diálogo de objetos. */
+.bedroom-dialogue {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(46px, 9vh, 92px);
+  transform: translateX(-50%);
+  z-index: 8;
+  width: min(620px, 88vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 20px 12px;
+  border: 1px solid rgba(158, 203, 255, 0.26);
+  border-radius: 4px;
+  background:
+    linear-gradient(180deg, rgba(12, 21, 42, 0.96), rgba(5, 9, 20, 0.97));
+  box-shadow:
+    0 22px 60px rgba(0, 0, 0, 0.7),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    inset 0 -22px 40px rgba(60, 110, 200, 0.06);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: bedroomDialogueIn 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.bedroom-dialogue::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(253, 224, 71, 0.75), rgba(253, 224, 71, 0) 62%);
+}
+
+.bedroom-dialogue__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.bedroom-dialogue__name {
+  font-family: var(--font-mono);
+  font-size: clamp(9px, 0.95vw, 11px);
+  font-weight: 700;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: #fde047;
+}
+
+.bedroom-dialogue__hint {
+  font-family: var(--font-mono);
+  font-size: clamp(8px, 0.82vw, 10px);
+  letter-spacing: 0.24em;
+  color: rgba(160, 194, 232, 0.55);
+}
+
+.bedroom-dialogue__text {
+  margin: 0;
+  min-height: 2.9em;
+  font-family: var(--font-sans);
+  font-size: clamp(13px, 1.32vw, 17px);
+  line-height: 1.62;
+  color: #eaf4ff;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.7);
+}
+
+.bedroom-dialogue__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border-top: 1px solid rgba(150, 190, 240, 0.12);
+  padding-top: 8px;
+  font-family: var(--font-mono);
+  font-size: clamp(8px, 0.84vw, 10px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(160, 194, 232, 0.55);
+}
+
+.bedroom-dialogue__next {
+  appearance: none;
+  border: 1px solid rgba(253, 224, 71, 0.34);
+  border-radius: 999px;
+  background: rgba(253, 224, 71, 0.08);
+  color: #fde047;
+  padding: 5px 13px;
+  font-family: var(--font-mono);
+  font-size: clamp(8px, 0.84vw, 10px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.bedroom-dialogue__next:hover,
+.bedroom-dialogue__next:focus-visible {
+  background: rgba(253, 224, 71, 0.18);
+  border-color: rgba(253, 224, 71, 0.7);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+/* Ayudas de control al recuperar el movimiento. */
+.bedroom-hint {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(18px, 3.4vh, 34px);
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 20px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: clamp(8px, 0.86vw, 10px);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(190, 218, 248, 0.62);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.9);
+  animation: bedroomHintIn 0.6s ease-out both;
+}
+
+.bedroom-hint b {
+  color: #fde047;
+  font-weight: 700;
+}
+
+/* Objetivo activo de la historia. */
+.bedroom-objective {
+  position: absolute;
+  top: clamp(16px, 4.4vh, 46px);
+  left: clamp(18px, 4vw, 54px);
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: min(340px, 74vw);
+  padding: 9px 16px 10px 13px;
+  border-left: 2px solid rgba(253, 224, 71, 0.75);
+  background: linear-gradient(90deg, rgba(6, 12, 24, 0.82), rgba(6, 12, 24, 0));
+  pointer-events: none;
+  overflow: hidden;
+  animation: bedroomObjectiveIn 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.bedroom-objective::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 20%, rgba(253, 224, 71, 0.09) 48%, transparent 72%);
+  transform: translateX(-110%);
+  animation: bedroomObjectiveSweep 4.6s ease-in-out 0.9s infinite;
+}
+
+.bedroom-objective__eyebrow {
+  font-family: var(--font-mono);
+  font-size: clamp(7px, 0.8vw, 9px);
+  font-weight: 700;
+  letter-spacing: 0.4em;
+  text-transform: uppercase;
+  color: #fde047;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.95);
+}
+
+.bedroom-objective__text {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(14px, 1.5vw, 19px);
+  font-weight: 500;
+  line-height: 1.35;
+  color: #eef6ff;
+  text-wrap: balance;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.95), 0 0 22px rgba(100, 160, 255, 0.16);
+}
+
+.bedroom-objective.is-chest {
+  border-left-color: rgba(122, 220, 232, 0.8);
+}
+
+.bedroom-objective.is-chest .bedroom-objective__eyebrow {
+  color: #7adce8;
+}
+
+.bedroom-objective.is-chest::after {
+  background: linear-gradient(100deg, transparent 20%, rgba(122, 220, 232, 0.12) 48%, transparent 72%);
+}
+
+/* Interferencia de la señal de radio sobre la escena. */
+.bedroom-signal {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  overflow: hidden;
+  opacity: 0.85;
+  animation: bedroomSignalFlicker 2.7s steps(1, end) infinite;
+}
+
+.bedroom-signal__scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 26vh;
+  background: linear-gradient(
+    180deg,
+    rgba(150, 210, 255, 0) 0%,
+    rgba(150, 210, 255, 0.05) 45%,
+    rgba(210, 236, 255, 0.09) 50%,
+    rgba(150, 210, 255, 0.04) 55%,
+    rgba(150, 210, 255, 0) 100%
+  );
+  animation: bedroomSignalScan 5.4s linear infinite;
+}
+
+.bedroom-signal__ticks {
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(170, 220, 255, 0.05) 0px,
+      rgba(170, 220, 255, 0.05) 1px,
+      transparent 1px,
+      transparent 4px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(140, 200, 255, 0.04) 0px,
+      rgba(140, 200, 255, 0.04) 1px,
+      transparent 1px,
+      transparent 7px
+    );
+  mix-blend-mode: screen;
+}
+
+.bedroom-stage.is-radio .bedroom-canvas {
+  filter: saturate(0.88) contrast(1.04);
+}
+
+/* Ecualizador de la radio dentro del diálogo. */
+.bedroom-radio-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+  margin-left: auto;
+  margin-right: 4px;
+}
+
+.bedroom-radio-bars i {
+  display: block;
+  width: 2px;
+  height: 30%;
+  border-radius: 1px;
+  background: #7adce8;
+  box-shadow: 0 0 6px rgba(122, 220, 232, 0.55);
+  animation: bedroomRadioBar 0.9s ease-in-out infinite alternate;
+}
+
+.bedroom-radio-bars i:nth-child(2) { animation-delay: -0.18s; }
+.bedroom-radio-bars i:nth-child(3) { animation-delay: -0.42s; }
+.bedroom-radio-bars i:nth-child(4) { animation-delay: -0.09s; }
+.bedroom-radio-bars i:nth-child(5) { animation-delay: -0.55s; }
+.bedroom-radio-bars i:nth-child(6) { animation-delay: -0.3s; }
+
+.bedroom-dialogue--radio {
+  border-color: rgba(122, 220, 232, 0.32);
+  background:
+    linear-gradient(180deg, rgba(8, 26, 38, 0.96), rgba(4, 10, 20, 0.97));
+}
+
+.bedroom-dialogue--radio::before {
+  background: linear-gradient(90deg, rgba(122, 220, 232, 0.8), rgba(122, 220, 232, 0) 62%);
+}
+
+.bedroom-dialogue--radio .bedroom-dialogue__name {
+  color: #7adce8;
+}
+
+.bedroom-dialogue--radio .bedroom-dialogue__next {
+  border-color: rgba(122, 220, 232, 0.38);
+  background: rgba(122, 220, 232, 0.08);
+  color: #9beaf3;
+}
+
+.bedroom-dialogue--radio .bedroom-dialogue__next:hover,
+.bedroom-dialogue--radio .bedroom-dialogue__next:focus-visible {
+  background: rgba(122, 220, 232, 0.2);
+  border-color: rgba(122, 220, 232, 0.75);
+}
+
+.bedroom-dialogue--reaction .bedroom-dialogue__name,
+.bedroom-dialogue--traveler .bedroom-dialogue__name {
+  color: #fde047;
+}
+
+/* Controles discretos, siempre accesibles. */
+.bedroom-controls {
+  position: absolute;
+  top: clamp(14px, 3.2vh, 30px);
+  right: clamp(14px, 2.6vw, 34px);
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.55;
+  transition: opacity 0.24s ease;
+}
+
+.bedroom-controls:hover,
+.bedroom-controls:focus-within {
+  opacity: 1;
+}
+
+.bedroom-icon-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(170, 208, 255, 0.24);
+  border-radius: 9px;
+  background: rgba(6, 13, 26, 0.62);
+  color: rgba(226, 244, 255, 0.86);
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.bedroom-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.bedroom-icon-btn:hover,
+.bedroom-icon-btn:focus-visible {
+  background: rgba(20, 40, 72, 0.85);
+  border-color: rgba(253, 224, 71, 0.48);
+  color: #fde047;
+  outline: none;
+}
+
+/* Pausa. */
+.bedroom-pause {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background:
+    radial-gradient(ellipse at 50% 44%, rgba(10, 18, 38, 0.72), rgba(2, 4, 10, 0.92) 74%);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  animation: bedroomFadeIn 0.24s ease-out both;
+}
+
+.bedroom-pause__card {
+  position: relative;
+  width: min(430px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 26px 28px 20px;
+  border: 1px solid rgba(164, 204, 255, 0.22);
+  border-radius: 6px;
+  background: linear-gradient(165deg, rgba(14, 24, 48, 0.96), rgba(5, 9, 20, 0.97));
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  text-align: center;
+  animation: bedroomCardIn 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.bedroom-pause__card::before {
+  content: '';
+  position: absolute;
+  left: 22%;
+  right: 22%;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(253, 224, 71, 0.7), transparent);
+}
+
+.bedroom-pause__eyebrow {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: rgba(160, 196, 238, 0.6);
+}
+
+.bedroom-pause__title {
+  margin: 2px 0 0;
+  font-family: var(--font-display);
+  font-size: clamp(26px, 3.4vw, 36px);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #f4faff;
+  text-shadow: 0 0 30px rgba(90, 150, 255, 0.25);
+}
+
+.bedroom-pause__sub {
+  margin: 0 0 10px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-style: italic;
+  color: rgba(176, 204, 238, 0.66);
+}
+
+.bedroom-pause__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bedroom-pause__btn {
+  appearance: none;
+  padding: 11px 16px;
+  border: 1px solid rgba(158, 200, 250, 0.24);
+  border-radius: 8px;
+  background: rgba(12, 22, 42, 0.72);
+  color: #d9eaff;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+
+.bedroom-pause__btn:hover,
+.bedroom-pause__btn:focus-visible {
+  background: rgba(26, 46, 82, 0.9);
+  border-color: rgba(253, 224, 71, 0.45);
+  color: #fde047;
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.bedroom-pause__btn.is-primary {
+  border-color: rgba(253, 224, 71, 0.55);
+  background: linear-gradient(180deg, rgba(253, 224, 71, 0.2), rgba(253, 224, 71, 0.07));
+  color: #fde047;
+}
+
+.bedroom-pause__foot {
+  margin: 8px 0 0;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: rgba(150, 184, 226, 0.42);
+}
+
+@keyframes bedroomLineIn {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@keyframes bedroomPromptIn {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@keyframes bedroomDialogueIn {
+  from { opacity: 0; transform: translate(-50%, 16px) scale(0.985); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+
+@keyframes bedroomHintIn {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@keyframes bedroomCaret {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@keyframes bedroomFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes bedroomCardIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes bedroomObjectiveIn {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes bedroomObjectiveSweep {
+  0% { transform: translateX(-110%); }
+  42%, 100% { transform: translateX(140%); }
+}
+
+@keyframes bedroomSignalScan {
+  0% { top: -30vh; }
+  100% { top: 110vh; }
+}
+
+@keyframes bedroomSignalFlicker {
+  0%, 93%, 100% { opacity: 0.85; }
+  94% { opacity: 0.45; }
+  95% { opacity: 0.9; }
+  96% { opacity: 0.6; }
+  97% { opacity: 0.88; }
+}
+
+@keyframes bedroomRadioBar {
+  from { height: 24%; opacity: 0.7; }
+  to { height: 100%; opacity: 1; }
+}
+
+/* =========================================================
+   PRÓLOGO · EL COMEDOR
+   La sala reutiliza la tipografía del dormitorio; aquí sólo
+   se suman el umbral y la cerradura de tres discos.
+   ========================================================= */
+.comedor-fade-in {
+  animation: comedorFadeIn 560ms ease-in both;
+}
+
+.comedor-fade-out {
+  animation: comedorFadeOut 520ms ease-in forwards;
+}
+
+@keyframes comedorFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes comedorFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.comedor-lock-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: radial-gradient(ellipse at 50% 55%, rgba(3, 7, 16, 0.5), rgba(2, 4, 10, 0.88));
+  backdrop-filter: blur(1.5px);
+}
+
+.comedor-lock {
+  position: relative;
+  width: min(420px, 92vw);
+  padding: 22px 22px 18px;
+  border: 1px solid rgba(201, 164, 90, 0.5);
+  background:
+    linear-gradient(180deg, rgba(30, 20, 12, 0.97), rgba(14, 9, 6, 0.98)),
+    repeating-linear-gradient(90deg, rgba(255, 214, 150, 0.05) 0 1px, transparent 1px 9px);
+  box-shadow:
+    0 26px 80px rgba(0, 0, 0, 0.75),
+    inset 0 1px 0 rgba(255, 224, 168, 0.16);
+  color: #f4e6cf;
+  animation: bedroomCardIn 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.comedor-lock::before {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  border: 1px solid rgba(201, 164, 90, 0.22);
+  pointer-events: none;
+}
+
+.comedor-lock__eyebrow {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: #f0c97a;
+}
+
+.comedor-lock__title {
+  margin: 8px 0 2px;
+  font-family: var(--font-display);
+  font-size: clamp(20px, 2.6vw, 27px);
+  letter-spacing: 0.01em;
+  color: #fff6e6;
+}
+
+.comedor-lock__sub {
+  margin: 0 0 16px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.6;
+  color: rgba(226, 200, 164, 0.72);
+}
+
+.comedor-lock__slots {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin: 6px 0 4px;
+}
+
+.comedor-lock__slot {
+  width: 62px;
+  height: 74px;
+  border: 1px solid rgba(201, 164, 90, 0.45);
+  border-radius: 3px;
+  background:
+    linear-gradient(180deg, rgba(9, 6, 3, 0.95), rgba(24, 16, 9, 0.95));
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.7), 0 0 0 3px rgba(0, 0, 0, 0.35);
+  color: #ffe6ac;
+  font-family: var(--font-display);
+  font-size: 38px;
+  line-height: 1;
+  text-align: center;
+  caret-color: #f0c97a;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
+}
+
+.comedor-lock__slot:focus {
+  border-color: rgba(253, 224, 71, 0.85);
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.7), 0 0 18px rgba(253, 224, 71, 0.28);
+}
+
+.comedor-lock__slots.is-error {
+  animation: comedorLockShake 0.36s ease-in-out both;
+}
+
+.comedor-lock__slots.is-error .comedor-lock__slot {
+  border-color: rgba(251, 113, 133, 0.75);
+  color: #fecdd3;
+}
+
+@keyframes comedorLockShake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-7px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(3px); }
+}
+
+.comedor-lock__error {
+  margin: 10px 0 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: #fda4af;
+}
+
+.comedor-lock__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.comedor-lock__btn {
+  flex: 1;
+  min-height: 42px;
+  border: 1px solid rgba(201, 164, 90, 0.35);
+  background: rgba(201, 164, 90, 0.08);
+  color: rgba(244, 230, 207, 0.86);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.comedor-lock__btn:hover,
+.comedor-lock__btn:focus-visible {
+  background: rgba(201, 164, 90, 0.18);
+  border-color: rgba(253, 224, 71, 0.6);
+  color: #fff6e6;
+}
+
+.comedor-lock__btn.is-primary {
+  border-color: rgba(253, 224, 71, 0.6);
+  background: linear-gradient(180deg, rgba(253, 224, 71, 0.26), rgba(201, 164, 90, 0.12));
+  color: #fde9a8;
+}
+
+.comedor-lock__foot {
+  margin: 12px 0 0;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(201, 164, 90, 0.5);
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .bedroom-tag {
+    top: 14px;
+    left: 14px;
+    letter-spacing: 0.22em;
+  }
+
+  .bedroom-objective {
+    top: 12px;
+    left: 14px;
+    max-width: 68vw;
+    padding: 7px 12px 8px 10px;
+  }
+
+  .bedroom-story-line {
+    bottom: 86px;
+    gap: 7px;
+  }
+
+  .bedroom-dialogue {
+    width: calc(100vw - 28px);
+    bottom: 40px;
+    padding: 13px 15px 10px;
+  }
+
+  .bedroom-dialogue__hint {
+    display: none;
+  }
+
+  .bedroom-prompt {
+    bottom: 120px;
+  }
+
+  .bedroom-hint {
+    gap: 4px 12px;
+    bottom: 14px;
+  }
+
+  .bedroom-pause__card {
+    padding: 22px 20px 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bedroom-letterbox__bar,
+  .bedroom-tag,
+  .bedroom-icon-btn,
+  .bedroom-dialogue__next,
+  .bedroom-pause__btn {
+    transition-duration: 0.01ms !important;
+  }
+
+  .bedroom-story-line,
+  .bedroom-prompt,
+  .bedroom-dialogue,
+  .bedroom-hint,
+  .bedroom-objective,
+  .bedroom-pause,
+  .bedroom-pause__card {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  .bedroom-objective::after,
+  .bedroom-signal,
+  .bedroom-signal__scan,
+  .bedroom-radio-bars i {
+    animation: none !important;
+  }
+
+  .bedroom-radio-bars i {
+    height: 62%;
+  }
+
+  .bedroom-caret {
+    animation: none !important;
+    opacity: 0.8;
   }
 }

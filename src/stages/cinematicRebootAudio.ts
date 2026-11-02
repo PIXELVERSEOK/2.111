@@ -53,9 +53,13 @@ class CinematicRebootScore {
   private sources = new Set<AudioScheduledSourceNode>();
   private fired = new Set<string>();
   private cues: Cue[] = [];
+  /** Cue separado para la cinemática ilustrada de siete escenas. */
+  private imageCues: Cue[] = [];
+  private imageFired = new Set<string>();
 
   constructor() {
     this.buildCues();
+    this.buildImageCues();
   }
 
   private ensureContext(): AudioContext | null {
@@ -515,6 +519,109 @@ class CinematicRebootScore {
         ? 0.014 * smoothstep(103, 108, t) * (1 - smoothstep(126.2, 127.9, t))
         : 0;
     this.setLayer('crackle', crackle, 0.7);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* CINEMÁTICA ILUSTRADA · SIETE ESCENAS                               */
+  /* ------------------------------------------------------------------ */
+
+  public resetImageTimeline(fromSec = 0): void {
+    this.stopAll();
+    this.imageFired.clear();
+    for (const cue of this.imageCues) {
+      if (cue.time < fromSec - 0.12) this.imageFired.add(cue.id);
+    }
+  }
+
+  public syncImageTimeline(elapsedSec: number, paused: boolean): void {
+    if (paused || bgmEngine.isMuted()) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    if (ctx.state !== 'running') {
+      for (const cue of this.imageCues) {
+        if (elapsedSec - cue.time > 0.8) this.imageFired.add(cue.id);
+      }
+      return;
+    }
+
+    for (const cue of this.imageCues) {
+      if (elapsedSec >= cue.time && !this.imageFired.has(cue.id)) {
+        this.imageFired.add(cue.id);
+        if (elapsedSec - cue.time <= 1.4) cue.run(this);
+      }
+    }
+
+    const t = elapsedSec;
+
+    // 01 · La época dorada: la sala respira, cálida y viva.
+    let hum = 0;
+    if (t < 16) {
+      hum = 0.04 * smoothstep(0.3, 2.2, t) * (1 - smoothstep(15.1, 16, t));
+    } else if (t < 32) {
+      hum = 0.06 * smoothstep(16, 17, t) * (1 - smoothstep(31.3, 32, t));
+    } else if (t < 44) {
+      hum = 0.055 * smoothstep(32, 33, t) * (1 - smoothstep(43.2, 44, t));
+    } else if (t < 60) {
+      hum = 0.04 * (1 - smoothstep(54, 60, t));
+    }
+    this.setLayer('hum', hum, 0.4);
+
+    let vibration = 0;
+    if (t >= 16 && t < 32) vibration = 0.05 * smoothstep(16, 17.4, t);
+    else if (t >= 32 && t < 44) {
+      vibration = 0.055 + 0.03 * smoothstep(32, 38.8, t);
+    } else if (t >= 44 && t < 60) {
+      vibration = 0.075 * (1 - smoothstep(54, 60, t));
+    }
+    this.setLayer('vibration', vibration, 0.4);
+
+    let pad = 0;
+    if (t < 16) pad = 0.012 * smoothstep(4, 8, t);
+    else if (t < 32) pad = 0.05;
+    else if (t < 44) pad = 0.07;
+    else if (t < 60) pad = 0.092;
+    else if (t < 74) pad = 0.045;
+    else if (t < 92) pad = 0.03;
+    else if (t < 104) pad = 0.034 * (1 - smoothstep(98, 103.4, t));
+    this.setLayer('pad', pad, 0.6);
+
+    let shimmer = 0;
+    if (t < 16) shimmer = 0.018 * smoothstep(1.2, 4, t);
+    else if (t < 32) shimmer = 0.01;
+    else if (t < 44) shimmer = 0.008;
+    else if (t < 60) shimmer = 0.016 * (1 - smoothstep(54, 60, t));
+    else if (t < 74) shimmer = 0.009;
+    else if (t < 92) shimmer = 0.012;
+    else if (t < 104) shimmer = 0.01 * (1 - smoothstep(97, 103, t));
+    this.setLayer('shimmer', shimmer, 0.7);
+
+    let drone = 0;
+    if (t >= 16 && t < 32) drone = 0.05 * smoothstep(16, 18, t);
+    else if (t >= 32 && t < 44) drone = 0.07;
+    else if (t >= 44 && t < 60) drone = 0.1 * (1 - smoothstep(56, 60, t));
+    else if (t >= 60 && t < 74) drone = 0.038;
+    this.setLayer('drone', drone, 0.5);
+
+    let wind = 0;
+    if (t >= 60 && t < 74) wind = 0.032 * smoothstep(60, 63, t);
+    else if (t >= 74 && t < 92) wind = 0.026;
+    else if (t >= 92 && t < 104) {
+      wind = 0.036 * (1 - smoothstep(98, 103.2, t));
+    }
+    this.setLayer('wind', wind, 1);
+
+    let crackle = 0;
+    if (t < 16) crackle = 0.004;
+    else if (t < 32) crackle = 0.01;
+    else if (t < 44) crackle = 0.008;
+    else if (t < 60) crackle = 0.012;
+    else if (t < 74) crackle = 0.008;
+    else if (t < 92) crackle = 0.016;
+    else if (t < 104) crackle = 0.02 * (1 - smoothstep(99, 103, t));
+    this.setLayer('crackle', crackle, 0.7);
+
+    this.setLayer('ocean', 0, 0.8);
   }
 
   /* ------------------------------------------------------------------ */
@@ -1186,6 +1293,169 @@ class CinematicRebootScore {
       { id: 'radio-near-3', time: 123.8, run: (s) => s.radioPhrase(0, 0.043) },
       { id: 'radio-final', time: 125.6, run: (s) => s.radioPhrase(0, 0.04) },
       { id: 'handoff', time: 126.8, run: (s) => s.tone(130.81, 2.6, 0.016, 'sine') },
+    ];
+  }
+
+  private buildImageCues(): void {
+    this.imageCues = [
+      /* 01 · La época dorada */
+      { id: 'img-golden-1', time: 0.7, run: (s) => s.chime(523.25, 0, 0.028) },
+      { id: 'img-golden-2', time: 1.5, run: (s) => s.chime(659.25, 0, 0.026) },
+      { id: 'img-golden-3', time: 2.3, run: (s) => s.chime(783.99, 0, 0.024) },
+      {
+        id: 'img-golden-blip-1',
+        time: 3.1,
+        run: (s) => {
+          s.tone(1046.5, 0.12, 0.017, 'square');
+          s.tone(1318.51, 0.09, 0.013, 'square', 0.2);
+        },
+      },
+      { id: 'img-golden-4', time: 4.2, run: (s) => s.chime(880, 0, 0.02) },
+      {
+        id: 'img-golden-warm',
+        time: 6.7,
+        run: (s) => {
+          s.tone(392, 1.4, 0.018, 'triangle', 0, -0.2, 'music');
+          s.tone(493.88, 1.2, 0.014, 'triangle', 0.12, 0.2, 'music');
+        },
+      },
+      { id: 'img-golden-5', time: 8.2, run: (s) => s.chime(523.25, 0, 0.03) },
+      { id: 'img-golden-6', time: 8.9, run: (s) => s.chime(659.25, 0, 0.026) },
+      { id: 'img-golden-7', time: 9.6, run: (s) => s.chime(783.99, 0, 0.024) },
+      { id: 'img-golden-8', time: 10.3, run: (s) => s.chime(1046.5, 0, 0.02) },
+      {
+        id: 'img-golden-blip-2',
+        time: 12.0,
+        run: (s) => {
+          s.tone(880, 0.1, 0.015, 'square');
+          s.tone(1174.66, 0.09, 0.012, 'square', 0.16);
+          s.tone(1567.98, 0.08, 0.01, 'square', 0.32);
+        },
+      },
+      {
+        id: 'img-golden-out',
+        time: 14.6,
+        run: (s) => {
+          s.sweep(520, 180, 1.3, 0.022, 'sine');
+          s.noiseBurst(0.8, 0.012, 'lowpass', 600);
+        },
+      },
+
+      /* 02 · El antagonista */
+      { id: 'img-villain-creak', time: 16.4, run: (s) => s.metalCreak(1.2, 0.032) },
+      {
+        id: 'img-villain-breath',
+        time: 17.2,
+        run: (s) => {
+          s.tone(55, 2.4, 0.028, 'triangle');
+          s.noiseBurst(1.6, 0.01, 'lowpass', 220);
+        },
+      },
+      { id: 'img-villain-glitch-1', time: 20.6, run: (s) => s.glitchHit(0.55) },
+      { id: 'img-villain-creak-2', time: 23.8, run: (s) => s.metalCreak(1.5, 0.042) },
+      {
+        id: 'img-villain-lair',
+        time: 24.2,
+        run: (s) => {
+          s.sweep(104, 58, 2.4, 0.028, 'sawtooth');
+          s.tone(65.4, 2.6, 0.026, 'triangle');
+        },
+      },
+      { id: 'img-villain-glitch-2', time: 26.8, run: (s) => s.glitchHit(0.9) },
+      {
+        id: 'img-villain-insert',
+        time: 27.2,
+        run: (s) => {
+          s.tone(65.4, 1.8, 0.038, 'triangle');
+          s.noiseBurst(0.8, 0.018, 'bandpass', 900);
+        },
+      },
+      { id: 'img-villain-glitch-3', time: 30.2, run: (s) => s.glitchHit(0.5) },
+
+      /* 03 · El botón rojo */
+      { id: 'img-button-step-1', time: 32.6, run: (s) => s.powerStep(0) },
+      { id: 'img-button-step-2', time: 34.0, run: (s) => s.powerStep(1) },
+      { id: 'img-button-step-3', time: 35.2, run: (s) => s.powerStep(2) },
+      { id: 'img-button-step-4', time: 36.4, run: (s) => s.powerStep(3) },
+      {
+        id: 'img-button-approach',
+        time: 37.4,
+        run: (s) => {
+          s.sweep(90, 180, 2.2, 0.028, 'sawtooth');
+          s.tone(65, 2.2, 0.045, 'triangle');
+        },
+      },
+      { id: 'img-button-press', time: 38.8, run: (s) => s.pressButton() },
+      { id: 'img-button-crack', time: 39.1, run: (s) => s.noiseBurst(0.5, 0.06, 'highpass', 1200) },
+      { id: 'img-button-glitch-1', time: 40.6, run: (s) => s.glitchHit(0.7) },
+      { id: 'img-button-glitch-2', time: 42.2, run: (s) => s.glitchHit(0.5) },
+
+      /* 04 · La destrucción del universo */
+      {
+        id: 'img-destruction-open',
+        time: 44.2,
+        run: (s) => {
+          s.sweep(280, 60, 3.2, 0.048, 'sawtooth');
+          s.noiseBurst(1.8, 0.028, 'lowpass', 240);
+        },
+      },
+      { id: 'img-destruction-crack', time: 47.8, run: (s) => s.noiseBurst(0.7, 0.085, 'bandpass', 1800) },
+      {
+        id: 'img-destruction-impact',
+        time: 48.0,
+        run: (s) => {
+          s.tone(36, 3.4, 0.14, 'sine');
+          s.noiseBurst(1.8, 0.1, 'lowpass', 220);
+          s.glitchHit(1);
+        },
+      },
+      { id: 'img-destruction-glitch-1', time: 49.8, run: (s) => s.glitchHit(0.8) },
+      { id: 'img-destruction-glitch-2', time: 51.4, run: (s) => s.glitchHit(0.7) },
+      {
+        id: 'img-destruction-flash',
+        time: 52.4,
+        run: (s) => {
+          s.noiseBurst(1.2, 0.095, 'lowpass', 400);
+          s.tone(32, 2.8, 0.11, 'sine');
+        },
+      },
+      { id: 'img-destruction-glitch-3', time: 54.6, run: (s) => s.glitchHit(0.5) },
+      { id: 'img-destruction-out', time: 56.4, run: (s) => s.sweep(220, 38, 3, 0.038, 'sine') },
+
+      /* 05 · El universo alterado */
+      {
+        id: 'img-altered-glitch',
+        time: 60.4,
+        run: (s) => {
+          s.glitchHit(0.8);
+          s.noiseBurst(0.8, 0.028, 'bandpass', 1200);
+        },
+      },
+      { id: 'img-altered-drone', time: 62.2, run: (s) => s.tone(49, 3.2, 0.036, 'triangle') },
+      { id: 'img-altered-sweep', time: 64.4, run: (s) => s.sweep(120, 70, 3, 0.026, 'sine') },
+      { id: 'img-altered-glitch-2', time: 66.0, run: (s) => s.glitchHit(0.4) },
+      { id: 'img-altered-static', time: 67.2, run: (s) => s.noiseBurst(0.6, 0.018, 'highpass', 2000) },
+      { id: 'img-altered-chime', time: 70.2, run: (s) => s.chime(392, 0, 0.021) },
+      { id: 'img-altered-out', time: 72.4, run: (s) => s.tone(65.4, 2.4, 0.028, 'triangle') },
+
+      /* 06 · Pixel en su habitación */
+      { id: 'img-room-thunder-1', time: 74.6, run: (s) => s.thunder() },
+      { id: 'img-room-rain', time: 76.0, run: (s) => s.noiseBurst(2.2, 0.018, 'lowpass', 900) },
+      { id: 'img-room-thunder-2', time: 77.5, run: (s) => s.thunder() },
+      { id: 'img-room-chime', time: 80.0, run: (s) => s.chime(523.25, 0, 0.018) },
+      { id: 'img-room-thunder-3', time: 82.3, run: (s) => s.thunder() },
+      { id: 'img-room-radio', time: 84.0, run: (s) => s.radioPhrase(0, 0.02) },
+      { id: 'img-room-thunder-4', time: 86.2, run: (s) => s.thunder() },
+      { id: 'img-room-thunder-5', time: 88.0, run: (s) => s.thunder() },
+      { id: 'img-room-out', time: 90.0, run: (s) => s.chime(392, 0, 0.016) },
+
+      /* 07 · El comienzo */
+      { id: 'img-start-thunder', time: 92.4, run: (s) => s.thunder() },
+      { id: 'img-start-rain', time: 94.0, run: (s) => s.noiseBurst(2.4, 0.018, 'lowpass', 800) },
+      { id: 'img-start-thunder-2', time: 96.5, run: (s) => s.thunder() },
+      { id: 'img-start-sweep', time: 99.0, run: (s) => s.sweep(720, 140, 1.6, 0.038, 'sine') },
+      { id: 'img-start-chime', time: 100.2, run: (s) => s.chime(261.63, 0, 0.03) },
+      { id: 'img-start-final', time: 101.2, run: (s) => s.tone(130.81, 2.4, 0.028, 'triangle') },
     ];
   }
 

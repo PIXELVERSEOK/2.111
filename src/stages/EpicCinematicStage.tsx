@@ -2,17 +2,16 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Cinemática de apertura de PIXELVERSE.
+ * Cinemática de apertura de PIXELVERSE: «El reinicio del universo».
  *
- * Nueve escenas y 128 segundos: la consola antigua, la garra, la pulsación del
- * Reinicio Cero, SUPER KING KOOPA, la onda que borra la memoria de los
- * videojuegos, el planeta y la fecha, el océano, la isla y la ventana
- * encendida. El lienzo se ocupa de la imagen y de la cámara; esta capa React
- * sólo añade subtítulos, la fecha y los controles discretos.
+ * Siete escenas ilustradas y animadas (época dorada, antagonista, botón
+ * rojo, destrucción, universo alterado, habitación de Pixel y transición)
+ * con cámara, capas de ambiente, subtítulos escritos y sonido sincronizado.
  *
- * El primer acto (0–94 s) termina en el menú. El segundo (94–128 s) se lanza
- * después de crear la identidad y se funde a negro para que la escena de la
- * cabaña que ya existe en Isla Natal tome el relevo sin recrearla.
+ * El lienzo 4:3 se ocupa de la imagen. Esta capa React sólo añade el rótulo
+ * de escena, los subtítulos y los controles discretos. Al terminar se entrega
+ * el control al menú (o a la llegada a Isla Natal en el segundo acto), sin
+ * alterar la creación de personaje ni el flujo de inicio existente.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -21,17 +20,11 @@ import { bgmEngine } from '../audio/bgmEngine';
 import { retroAudio } from '../audio/retroAudio';
 import { cinematicRebootAudio } from './cinematicRebootAudio';
 import {
-  cinematicRebootNarrator,
-  getActiveRebootBeatAtTime,
-  TOTAL_CINEMATIC_DURATION_SEC,
-} from './cinematicRebootNarrator';
-import { createCinematicRebootWorld } from './cinematicRebootWorld';
-
-const DATE_TEXT = '23 DE OCTUBRE DE 2026';
-const DATE_VISIBLE_START_SEC = 84.35;
-const DATE_VISIBLE_END_SEC = 92.55;
-const DATE_TYPE_START_SEC = 84.6;
-const DATE_TYPE_INTERVAL_SEC = 0.17;
+  CINEMATIC_IMAGE_DURATION_SEC,
+  getActiveImageBeatAtTime,
+  getImageSceneAt,
+} from './cinematicImageTimeline';
+import { createCinematicImageWorld } from './cinematicImageWorld';
 
 function clamp01(value: number): number {
   return value < 0 ? 0 : value > 1 ? 1 : value;
@@ -41,6 +34,8 @@ function ramp01(value: number): number {
   const c = clamp01(value);
   return c * c * (3 - 2 * c);
 }
+
+const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'];
 
 export interface EpicCinematicStageProps {
   runKey: number;
@@ -55,7 +50,7 @@ export function EpicCinematicStage({
   runKey,
   onComplete,
   startAtSec = 0,
-  endAtSec = TOTAL_CINEMATIC_DURATION_SEC,
+  endAtSec = CINEMATIC_IMAGE_DURATION_SEC,
 }: EpicCinematicStageProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const onCompleteRef = useRef(onComplete);
@@ -65,7 +60,7 @@ export function EpicCinematicStage({
   const segmentEndRef = useRef(endAtSec);
   segmentStartRef.current = startAtSec;
   segmentEndRef.current = Math.min(
-    TOTAL_CINEMATIC_DURATION_SEC,
+    CINEMATIC_IMAGE_DURATION_SEC,
     Math.max(startAtSec + 1, endAtSec)
   );
 
@@ -73,9 +68,6 @@ export function EpicCinematicStage({
   const [isMuted, setIsMuted] = useState(() => bgmEngine.isMuted());
   const [uiTimeSec, setUiTimeSec] = useState(0);
   const [reducedMotion, setReducedMotion] = useState(false);
-  const [dateForcedComplete, setDateForcedComplete] = useState(false);
-  const dateForcedCompleteRef = useRef(false);
-  const lastTypedRef = useRef(0);
 
   const playbackRef = useRef({
     elapsedSec: 0,
@@ -96,10 +88,7 @@ export function EpicCinematicStage({
   useEffect(() => {
     const unsub = bgmEngine.subscribe((muted) => {
       setIsMuted(muted);
-      if (muted) {
-        cinematicRebootAudio.stopAll();
-        cinematicRebootNarrator.stopCurrent();
-      }
+      if (muted) cinematicRebootAudio.stopAll();
     });
     return unsub;
   }, []);
@@ -108,7 +97,6 @@ export function EpicCinematicStage({
     if (playbackRef.current.finished) return;
     playbackRef.current.finished = true;
     cinematicRebootAudio.stopAll();
-    cinematicRebootNarrator.stopCurrent();
     bgmEngine.setDuckFactor(1);
     onCompleteRef.current();
   }, []);
@@ -119,10 +107,8 @@ export function EpicCinematicStage({
       playbackRef.current.paused = next;
       if (next) {
         cinematicRebootAudio.stopAll();
-        cinematicRebootNarrator.stopCurrent();
       } else {
-        cinematicRebootAudio.resetTimeline(playbackRef.current.elapsedSec);
-        cinematicRebootNarrator.resetTimeline(playbackRef.current.elapsedSec);
+        cinematicRebootAudio.resetImageTimeline(playbackRef.current.elapsedSec);
       }
       return next;
     });
@@ -134,25 +120,19 @@ export function EpicCinematicStage({
 
     const segmentStart = Math.max(
       0,
-      Math.min(TOTAL_CINEMATIC_DURATION_SEC - 0.05, segmentStartRef.current)
+      Math.min(CINEMATIC_IMAGE_DURATION_SEC - 0.05, segmentStartRef.current)
     );
-    const seekTo = segmentStart;
 
     playbackRef.current = {
-      elapsedSec: seekTo,
+      elapsedSec: segmentStart,
       paused: false,
       finished: false,
       lastUiSyncSec: -1,
     };
     setIsPaused(false);
-    setUiTimeSec(seekTo);
-    setDateForcedComplete(false);
-    dateForcedCompleteRef.current = false;
-    lastTypedRef.current = 0;
+    setUiTimeSec(segmentStart);
 
-    cinematicRebootAudio.resetTimeline(seekTo);
-    cinematicRebootNarrator.resetTimeline(seekTo);
-    cinematicRebootNarrator.preload();
+    cinematicRebootAudio.resetImageTimeline(segmentStart);
 
     const unlockAudio = () => {
       retroAudio.unlock();
@@ -169,17 +149,17 @@ export function EpicCinematicStage({
       window.removeEventListener('touchstart', unlockAudio);
       window.removeEventListener('keydown', unlockAudio);
       cinematicRebootAudio.stopAll();
-      cinematicRebootNarrator.stopCurrent();
       bgmEngine.setDuckFactor(1);
     };
   }, [runKey]);
 
-  // Lienzo y cámara.
+  // Lienzo, imágenes y cámara.
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
 
-    const world = createCinematicRebootWorld(mount, reducedMotion);
+    const world = createCinematicImageWorld(mount, reducedMotion);
+    void world.preload();
     let frameId = 0;
     let disposed = false;
     let lastNow = performance.now();
@@ -193,8 +173,7 @@ export function EpicCinematicStage({
       const pb = playbackRef.current;
       if (!pb.paused && !pb.finished) {
         pb.elapsedSec += rawDelta;
-        cinematicRebootAudio.syncTimeline(pb.elapsedSec, false);
-        cinematicRebootNarrator.syncTimeline(pb.elapsedSec, false);
+        cinematicRebootAudio.syncImageTimeline(pb.elapsedSec, false);
 
         if (Math.abs(pb.elapsedSec - pb.lastUiSyncSec) >= 0.08) {
           pb.lastUiSyncSec = pb.elapsedSec;
@@ -222,45 +201,25 @@ export function EpicCinematicStage({
     };
   }, [finishCinematic, reducedMotion]);
 
-  // Espacio: durante la fecha completa la escritura y luego avanza.
-  // En el resto del metraje pausa; Escape omite.
+  // Espacio o Escape omiten la cinemática; P pausa.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key === ' ' || event.key === 'Escape') {
         event.preventDefault();
         finishCinematic();
         return;
       }
-      if (event.key !== ' ') return;
-      event.preventDefault();
-
-      const time = playbackRef.current.elapsedSec;
-      if (time >= DATE_VISIBLE_START_SEC && time <= DATE_VISIBLE_END_SEC) {
-        const typed = dateForcedCompleteRef.current
-          ? DATE_TEXT.length
-          : Math.min(
-              DATE_TEXT.length,
-              Math.max(
-                0,
-                Math.floor((time - DATE_TYPE_START_SEC) / DATE_TYPE_INTERVAL_SEC) + 1
-              )
-            );
-        if (typed < DATE_TEXT.length) {
-          dateForcedCompleteRef.current = true;
-          setDateForcedComplete(true);
-        } else {
-          finishCinematic();
-        }
-        return;
+      if (event.key === 'p' || event.key === 'P') {
+        event.preventDefault();
+        handleTogglePause();
       }
-
-      handleTogglePause();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [finishCinematic, handleTogglePause]);
 
-  const activeBeat = getActiveRebootBeatAtTime(uiTimeSec);
+  const activeBeat = getActiveImageBeatAtTime(uiTimeSec);
+  const activeScene = getImageSceneAt(uiTimeSec);
   const words = useMemo(
     () => (activeBeat ? activeBeat.subtitle.split(' ') : []),
     [activeBeat]
@@ -269,80 +228,42 @@ export function EpicCinematicStage({
   let revealedWords = words.length;
   if (activeBeat && words.length > 0) {
     const span = Math.max(0.6, activeBeat.endSec - activeBeat.startSec);
-    const progress = ramp01((uiTimeSec - activeBeat.startSec) / (span * 0.78));
+    const progress = ramp01((uiTimeSec - activeBeat.startSec) / (span * 0.74));
     revealedWords = Math.max(1, Math.ceil(progress * words.length));
   }
 
-  const dateVisible =
-    uiTimeSec >= DATE_VISIBLE_START_SEC && uiTimeSec <= DATE_VISIBLE_END_SEC;
-  const dateOpacity = Math.min(
-    ramp01((uiTimeSec - DATE_VISIBLE_START_SEC) / 0.55),
-    1 - ramp01((uiTimeSec - 90.9) / 1.5)
+  const sceneLocalSec = uiTimeSec - activeScene.startSec;
+  const sceneTagOpacity = Math.min(
+    ramp01(sceneLocalSec / 0.55),
+    1 - ramp01((sceneLocalSec - 4.4) / 1.3)
   );
-  const typedCount = Math.min(
-    DATE_TEXT.length,
-    dateForcedComplete
-      ? DATE_TEXT.length
-      : Math.max(
-          0,
-          Math.floor((uiTimeSec - DATE_TYPE_START_SEC) / DATE_TYPE_INTERVAL_SEC) + 1
-        )
-  );
-  const typedDate = DATE_TEXT.slice(0, Math.max(0, typedCount));
-  const flashOpacity =
-    uiTimeSec >= 81.34 && uiTimeSec <= 82.28
-      ? 1 - ramp01((uiTimeSec - 81.42) / 0.82)
-      : 0;
-
-  // Cada letra de la fecha tiene su pequeño chasquido.
-  useEffect(() => {
-    const previous = lastTypedRef.current;
-    if (
-      uiTimeSec >= DATE_VISIBLE_START_SEC &&
-      typedCount > previous &&
-      typedCount - previous <= 2 &&
-      !isPaused
-    ) {
-      cinematicRebootAudio.typeTick();
-    }
-    lastTypedRef.current = typedCount;
-  }, [isPaused, typedCount, uiTimeSec]);
 
   return (
-    <div className="cr-stage select-none" role="region" aria-label="Cinemática de apertura de PIXELVERSE">
+    <div
+      className="cr-stage select-none"
+      role="region"
+      aria-label="Cinemática de apertura de PIXELVERSE"
+    >
       <div ref={mountRef} className="cr-canvas-mount" />
       <div className="cr-atmosphere" aria-hidden="true" />
 
-      {flashOpacity > 0.001 && (
+      {sceneTagOpacity > 0.01 && (
         <div
-          className="cr-flash"
+          className="cr-scene-tag"
+          style={{ opacity: sceneTagOpacity }}
           aria-hidden="true"
-          style={{ opacity: flashOpacity }}
-        />
-      )}
-
-      {dateVisible && dateOpacity > 0.01 && (
-        <div
-          className="cr-date"
-          style={{ opacity: dateOpacity }}
-          aria-label="23 de octubre de 2026"
         >
-          <span className="cr-date__eyebrow">REGISTRO DEL REINICIO CERO</span>
-          <span className="cr-date__value" data-text={typedDate}>
-            {typedDate}
-            {typedCount < DATE_TEXT.length && (
-              <span className="cr-date__caret" aria-hidden="true" />
-            )}
+          <span className="cr-scene-tag__index">
+            {ROMAN[activeScene.index - 1] ?? 'I'}
           </span>
-          <span className="cr-date__rule" aria-hidden="true" />
+          <span className="cr-scene-tag__rule" />
+          <span className="cr-scene-tag__label">{activeScene.label}</span>
         </div>
       )}
 
-      {activeBeat && dateOpacity < 0.15 && (
+      {activeBeat && (
         <div
-          className={`cr-subtitle${
-            activeBeat.tone === 'villain' ? ' cr-subtitle--villain' : ''
-          }`}
+          className={`cr-subtitle cr-subtitle--${activeBeat.tone}`}
           aria-live="polite"
         >
           <p className="cr-subtitle__text">
@@ -364,7 +285,7 @@ export function EpicCinematicStage({
           type="button"
           onClick={handleTogglePause}
           aria-label="Pausar cinemática"
-          title="Pausar (Espacio)"
+          title="Pausar (P)"
           className="cr-icon-btn"
         >
           <Pause />
@@ -382,7 +303,7 @@ export function EpicCinematicStage({
           type="button"
           onClick={finishCinematic}
           className="cr-skip"
-          title="Omitir cinemática (Esc)"
+          title="Omitir cinemática (Espacio o Esc)"
         >
           <SkipForward />
           <span>Omitir</span>
@@ -399,7 +320,7 @@ export function EpicCinematicStage({
             <Play />
             <span>PAUSA</span>
           </span>
-          <span className="cr-pause__hint">Espacio o clic para continuar</span>
+          <span className="cr-pause__hint">P o clic para continuar</span>
         </button>
       )}
     </div>
