@@ -331,8 +331,20 @@ export const ISLA_NATAL_PATH_PLAZAS: IslaNatalPathPlaza[] = [
 export const ISLA_NATAL_SOLIDS: IslaNatalSolidRect[] = [
   { id: 'cabana', x: 596, y: 952, w: 112, h: 94 },
   { id: 'cobertizo', x: 1624, y: 718, w: 146, h: 122 },
-  // Huerta central cerrada: impide caminar sobre los cultivos y el cerco.
-  { id: 'huerta', x: 1040, y: 895, w: 272, h: 200 },
+  // Huerta central: la puerta sur queda abierta al camino del crucero. El cerco
+  // y las camas de cultivo conservan colisión, pero el pasillo central permite
+  // entrar, inspeccionar las hortalizas y volver a salir sin muros invisibles.
+  { id: 'huerta-cerco-norte', x: 1052, y: 900, w: 248, h: 12 },
+  { id: 'huerta-cerco-oeste-alto', x: 1032, y: 912, w: 12, h: 96 },
+  { id: 'huerta-cerco-oeste-bajo', x: 1024, y: 1008, w: 12, h: 96 },
+  { id: 'huerta-cerco-este-alto', x: 1292, y: 912, w: 12, h: 96 },
+  { id: 'huerta-cerco-este-bajo', x: 1316, y: 1008, w: 12, h: 96 },
+  { id: 'huerta-cerco-sur-oeste', x: 1032, y: 1086, w: 124, h: 16 },
+  { id: 'huerta-cerco-sur-este', x: 1196, y: 1086, w: 124, h: 16 },
+  { id: 'huerta-cama-noroeste', x: 1056, y: 922, w: 94, h: 82 },
+  { id: 'huerta-cama-noreste', x: 1202, y: 922, w: 94, h: 82 },
+  { id: 'huerta-cama-suroeste', x: 1056, y: 1012, w: 94, h: 58 },
+  { id: 'huerta-cama-sureste', x: 1202, y: 1012, w: 94, h: 58 },
   { id: 'bolo-norte', x: 454, y: 410, w: 64, h: 52 },
   { id: 'bolo-este', x: 702, y: 492, w: 56, h: 48 },
   { id: 'bolo-meseta-sur', x: 514, y: 668, w: 48, h: 42 },
@@ -511,7 +523,43 @@ export const ISLA_NATAL_FLAGS = {
   leverInstalled: 'isla-natal-palanca-instalada',
   /** La nube negra se disipó con la partida del enviado: ya no vuelve. */
   stormCleared: 'isla-natal-tormenta-disipada',
+  /** La huerta quedó sembrada; hoy está en crecimiento y aún no se cosecha. */
+  gardenPlanted: 'isla-natal-huerta-sembrada',
+  /** La cosecha estará lista para una misión futura de abastecimiento. */
+  gardenReady: 'isla-natal-huerta-lista',
+  /** Reservado para cuando la misión de recolección entregue los alimentos. */
+  gardenHarvested: 'isla-natal-huerta-cosechada',
 } as const;
+
+/**
+ * Huerta central de Isla Natal. La puerta sur conecta con el crucero de los
+ * cuatro caminos. Deja preparado el recurso de cosecha para que una misión
+ * futura pueda pedir alimentos sin cambiar el guardado actual: el estado vive
+ * en las banderas narrativas de la isla y el objeto ya existe en el catálogo.
+ */
+export const ISLA_NATAL_GARDEN = {
+  gate: { x: 1176, y: 1094, halfWidth: 22 },
+  inspect: { x: 1176, y: 1028, radius: 66 },
+  harvestItemId: 'item-cosecha-natal',
+  flags: {
+    planted: 'isla-natal-huerta-sembrada',
+    ready: 'isla-natal-huerta-lista',
+    harvested: 'isla-natal-huerta-cosechada',
+  },
+} as const;
+
+/** Etapas visuales de la huerta. Hoy sólo se alcanza «growing». */
+export type IslaNatalGardenStage = 'growing' | 'ready';
+
+export function natalGardenStage(
+  events: ReadonlySet<string> | readonly string[]
+): IslaNatalGardenStage {
+  const has = (id: string) =>
+    'has' in events
+      ? (events as ReadonlySet<string>).has(id)
+      : (events as readonly string[]).includes(id);
+  return has(ISLA_NATAL_FLAGS.gardenReady) ? 'ready' : 'growing';
+}
 
 /* ------------------------------------------------------------------ */
 /* PUNTOS DE INTERÉS Y DIÁLOGOS                                       */
@@ -525,6 +573,7 @@ export type IslaNatalPoiKind =
   | 'door'
   | 'mailbox'
   | 'crate'
+  | 'garden'
   | 'viewpoint-sea'
   | 'viewpoint-island'
   | 'arcade'
@@ -618,7 +667,41 @@ export const ISLA_NATAL_SIGNS: IslaNatalSignSpec[] = [
   }
 ];
 
+/**
+ * La huerta se inspecciona desde el pasillo central. Hoy todo está sembrado y
+ * creciendo; el diálogo de cosecha lista queda preparado para la misión futura.
+ */
+export const NATAL_GARDEN_DIALOG_GROWING: IslaNatalDialog = {
+  title: 'La huerta de la casa',
+  subtitle: 'Crucero de los cuatro caminos',
+  paragraphs: [
+    '«¡Se ve bien! Ya pronto tendré que cosechar lo sembrado.»',
+    'Los surcos están parejos y las hojas nuevas brillan al sol. Todavía no hay fruto: a estas hortalizas les falta un poco más de tiempo antes de poder recogerse.',
+  ],
+  hint: 'Los cultivos siguen creciendo. La cosecha aún no está lista.',
+};
+
+export const NATAL_GARDEN_DIALOG_READY: IslaNatalDialog = {
+  title: 'La huerta de la casa',
+  subtitle: 'Crucero de los cuatro caminos',
+  paragraphs: [
+    'Las hortalizas han crecido. Una cesta bien cargada bastaría para alimentar a una comunidad entera.',
+    'Todavía no hay dónde entregarla, pero la cosecha de Isla Natal ya es parte del viaje.',
+  ],
+  hint: 'Cosecha lista. La misión de abastecimiento llegará más adelante.',
+};
+
 export const ISLA_NATAL_POIS: IslaNatalPoi[] = [
+  {
+    id: 'huerta-central',
+    kind: 'garden',
+    x: ISLA_NATAL_GARDEN.inspect.x,
+    y: ISLA_NATAL_GARDEN.inspect.y,
+    radius: ISLA_NATAL_GARDEN.inspect.radius,
+    label: 'Inspeccionar los cultivos',
+    accentHex: '#86efac',
+    dialog: NATAL_GARDEN_DIALOG_GROWING,
+  },
   {
     id: 'cartel-playa',
     kind: 'sign',

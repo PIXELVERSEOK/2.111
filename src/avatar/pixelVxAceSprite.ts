@@ -21,6 +21,12 @@ export interface VxPixelRenderOptions {
   lanternRadiusScale?: number;
   interactAnim?: number;
   appearance?: AvatarAppearance;
+  /**
+   * Tiempo de marcha (0..3) derivado de la distancia real recorrida con el
+   * sistema compartido de `pixelMotion.ts`. Si falta, se usa la cadencia por
+   * tiempo histórica (previsualizaciones, escenas guionadas y NPCs).
+   */
+  walkFrameIndex?: number;
 }
 
 interface ColorRamp {
@@ -481,40 +487,64 @@ function drawVxLegsAndBoots(
     const rightStep = frame === 2;
 
     /**
-     * Pierna frontal/trasera con zancada legible: la pierna que avanza apoya la bota
-     * una fila por debajo del eje y abre 1px la postura; la que retrocede se eleva
-     * tres filas y se sombrea, de modo que los pies alternan altura en cada paso.
+     * Zancada frontal/trasera legible: la pierna que avanza abre la postura y apoya
+     * la suela en la línea del suelo; la que retrocede eleva el pie, flexiona la
+     * rodilla hacia el eje y queda en sombra. Los pies alternan apoyo y altura en
+     * cada paso sin estirar ni deformar la bota.
      */
     const drawFrontLeg = (side: -1 | 1, state: 'fwd' | 'back' | 'idle') => {
       const outer = side === -1 ? -4 : 4;
       const inner = side === -1 ? -2 : 2;
-      const spread = state === 'fwd' ? side : 0;
+      const spread = state === 'fwd' ? side * 2 : 0;
       const x1 = outer + spread;
       const x2 = inner + spread;
       const top = -5;
-      const bot = state === 'fwd' ? 1 : state === 'back' ? -2 : 0;
       const lifted = state === 'back';
+      const bot = lifted ? -2 : 0;
+      // La rodilla se marca hacia el eje sin mover la bota: la pierna se lee
+      // flexionada y los dos pies conservan su separación.
+      const kneeDx = lifted ? -side : 0;
 
       // Muslo y pantalón: la pierna retrasada queda en sombra.
       g.box(x1, top, x2, top + 2, lifted ? pants.mid : pants.base);
-      g.px(x1, top, pants.deep);
+      g.px(x1, top, lifted ? pants.deep : pants.mid);
       g.px(x2, top + 1, lifted ? pants.deep : pants.mid);
+      if (lifted) {
+        g.px(x2 + kneeDx, top + 2, pants.mid);
+      } else if (state === 'fwd') {
+        // Borde iluminado de la pierna que avanza.
+        g.px(x1, top + 1, pants.mid);
+        g.px(x2, top + 2, pants.deep);
+      }
 
-      // Bota: la retrasada se eleva y pierde el brillo de contacto.
+      // Bota: la que apoya conserva brillo de contacto; la que sube mantiene
+      // el volumen con un borde iluminado para no fundirse con el pantalón.
       const bootTop = bot - 2;
-      g.hline(x1, x2, bootTop, lifted ? boots.mid : boots.light);
+      g.hline(x1, x2, bootTop, lifted ? boots.base : boots.light);
       g.box(x1, bootTop + 1, x2, bot, lifted ? boots.mid : boots.base);
       g.px(x1, bot, boots.deep);
-      if (isDown && !lifted && state !== 'idle') {
+      if (lifted) {
+        g.px(x2, bootTop + 1, boots.base);
+      } else if (isDown && state === 'fwd') {
         g.px(x1 + 1, bootTop + 1, boots.spec);
-        g.px(x2, bootTop + 1, boots.light);
-      } else if (!isDown && !lifted && state !== 'idle') {
+        g.px(x2, bootTop + 2, boots.light);
+      } else if (!isDown && state === 'fwd') {
         // Suela que se ve al adelantar el pie de espaldas.
         g.hline(x1, x2, bot, sole);
       }
-      g.hline(x1, x2, bot + 1, sole);
-      g.vline(x1 - 1, top, bot, DARK_OUTLINE);
-      g.vline(x2 + 1, top + 1, bot, DARK_OUTLINE);
+      if (lifted) {
+        // Sólo la punta del pie elevado roza el suelo: el talón despega.
+        const toeA = side === -1 ? x1 : x2;
+        const toeB = side === -1 ? x1 + 1 : x2 - 1;
+        g.hline(toeA, toeB, bot + 1, sole);
+      } else {
+        g.hline(x1, x2, bot + 1, sole);
+      }
+      // Caña de la bota y contorno del muslo.
+      g.vline(x1 - 1, bootTop, bot, DARK_OUTLINE);
+      g.vline(x2 + 1, bootTop, bot, DARK_OUTLINE);
+      g.vline(x1 - 1, top, bootTop, DARK_OUTLINE);
+      g.vline(x2 + 1, top + 1, bootTop, DARK_OUTLINE);
     };
 
     drawFrontLeg(-1, leftStep ? 'fwd' : rightStep ? 'back' : 'idle');
@@ -535,6 +565,7 @@ function drawVxLegsAndBoots(
       // Postura neutra de perfil: pierna centrada con puntera orientada hacia el frente
       g.box(mx(-2), -5, mx(2), -3, pants.base);
       g.vline(mx(-2), -5, -3, pants.deep);
+      g.px(mx(1), -4, pants.mid);
       g.hline(mx(-2), mx(2), -2, boots.light);
       g.box(mx(-2), -1, mx(3), 0, boots.base);
       g.px(mx(-2), 0, boots.deep);
@@ -546,17 +577,19 @@ function drawVxLegsAndBoots(
       g.px(mx(4), -1, DARK_OUTLINE);
       g.px(mx(4), 0, DARK_OUTLINE);
     } else {
-      // Zancada lateral: pierna lejana (más oscura) + pierna cercana (iluminada).
-      // La pierna que retrocede se eleva una fila para que el apoyo alterne de verdad.
+      // Zancada lateral amplia: pierna lejana (más oscura) y pierna cercana
+      // (iluminada) se abren en tijera; la que retrocede despega el talón para
+      // que el apoyo cambie de pie en cada fotograma.
       const nearForward = frame === 0;
-      const farDx = nearForward ? -3 : 3;
-      const nearDx = nearForward ? 3 : -3;
+      const farDx = nearForward ? -4 : 4;
+      const nearDx = nearForward ? 4 : -4;
       const farLifted = nearForward;
       const nearLifted = !nearForward;
 
-      // 1. Pierna lejana
+      // 1. Pierna lejana en segundo plano
       g.box(mx(farDx - 1), -5, mx(farDx + 1), -3, pants.deep);
-      const farBootTop = farLifted ? -2 : -1;
+      g.px(mx(farDx + 1), -4, pants.mid);
+      const farBootTop = farLifted ? -3 : -2;
       const farBot = farLifted ? -1 : 0;
       g.box(mx(farDx - 1), farBootTop, mx(farDx + 2), farBot, boots.mid);
       g.px(mx(farDx + 2), farBot, boots.base);
@@ -564,16 +597,19 @@ function drawVxLegsAndBoots(
       g.vline(mx(farDx - 2), -5, farBot, DARK_OUTLINE);
       g.px(mx(farDx + 3), farBot, DARK_OUTLINE);
 
-      // 2. Pierna cercana en primer plano
+      // 2. Pierna cercana en primer plano, con talón y puntera bien separados
       g.box(mx(nearDx - 1), -5, mx(nearDx + 1), -3, pants.base);
       g.px(mx(nearDx - 1), -4, pants.mid);
+      g.px(mx(nearDx + 1), -4, pants.light);
       const nearBootTop = nearLifted ? -3 : -2;
       const nearBot = nearLifted ? -1 : 0;
-      g.hline(mx(nearDx - 1), mx(nearDx + 1), nearBootTop, boots.light);
-      g.box(mx(nearDx - 1), nearBootTop + 1, mx(nearDx + 2), nearBot, boots.base);
+      g.hline(mx(nearDx - 2), mx(nearDx + 1), nearBootTop, boots.light);
+      g.box(mx(nearDx - 2), nearBootTop + 1, mx(nearDx + 2), nearBot, boots.base);
       g.px(mx(nearDx + 1), nearBootTop + 1, boots.spec);
-      g.hline(mx(nearDx - 1), mx(nearDx + 2), nearBot + 1, sole);
-      g.vline(mx(nearDx - 2), -5, nearBot, DARK_OUTLINE);
+      g.px(mx(nearDx + 2), nearBootTop + 1, boots.light);
+      g.px(mx(nearDx - 2), nearBot, boots.deep);
+      g.hline(mx(nearDx - 2), mx(nearDx + 2), nearBot + 1, sole);
+      g.vline(mx(nearDx - 3), -5, nearBot, DARK_OUTLINE);
       g.px(mx(nearDx + 3), nearBot, DARK_OUTLINE);
     }
 
@@ -844,11 +880,13 @@ function drawVxArms(
 
   if (dir === 'down' || dir === 'up') {
     const isDown = dir === 'down';
-    const leftForward = isDown ? frame === 2 : frame === 0;
-    const rightForward = isDown ? frame === 0 : frame === 2;
+    // El brazo de cada lado oscila en oposición a la pierna del mismo lado,
+    // también de espaldas, para que el balanceo se lea en ambas perspectivas.
+    const leftForward = frame === 2;
+    const rightForward = frame === 0;
 
-    const lSwing = leftForward ? 2 : frame === 1 ? 0 : -2;
-    const rSwing = rightForward ? 2 : frame === 1 ? 0 : -2;
+    const lSwing = leftForward ? 3 : frame === 1 ? 0 : -3;
+    const rSwing = rightForward ? 3 : frame === 1 ? 0 : -3;
     const reach = isDown ? interactReach : 0;
 
     // Brazo izquierdo (x = -9..-8, separado del torso por pliegue de 1px en x = -7)
@@ -878,10 +916,11 @@ function drawVxArms(
       const fx = 5 + interactReach;
       g.box(mx(fx - 1), ty + 2, mx(fx), ty + 3, skin.mid);
       g.px(mx(fx), ty + 2, skin.base);
+      g.px(mx(fx - 1), ty + 4, skin.deep);
     }
 
     // Brazo cercano en primer plano (con contorno propio para despegarse del torso)
-    const swingDx = frame === 0 ? -2 : frame === 2 ? 2 : 0;
+    const swingDx = frame === 0 ? -3 : frame === 2 ? 3 : 0;
     const ax = swingDx + interactReach;
     g.vline(mx(ax - 2), ty, ty + 4, DARK_OUTLINE);
     g.vline(mx(ax + 2), ty, ty + 4, DARK_OUTLINE);
@@ -1755,10 +1794,22 @@ export function renderPixelVxAce4Dir(
 
   // Secuencia clásica RPG Maker VX Ace de 4 tiempos sobre 3 columnas: 1 (neutro) -> 0 (izq) -> 1 (neutro) -> 2 (der)
   const WALK_SEQUENCE: readonly (0 | 1 | 2)[] = [1, 0, 1, 2];
-  const cycleIndex = walking && !reducedMotion
-    ? Math.floor(animT * (sprinting ? 11.5 : 7.5)) % 4
+  // Las islas envían el tiempo derivado de la distancia real recorrida; así los
+  // pasos coinciden con el desplazamiento y no con el reloj. El resto de las
+  // escenas conserva la cadencia por tiempo como respaldo.
+  //
+  // La marcha es la respuesta directa al desplazamiento: los pies deben moverse
+  // siempre al caminar, también con «reducir movimiento» activado. Ese ajuste
+  // sigue apagando respiración, parpadeo y oscilaciones decorativas, pero no la
+  // animación de las piernas (antes se perdía en exteriores y sí se veía dentro
+  // de la casa, que no reenvía el ajuste).
+  const rawCycleIndex = walking
+    ? (typeof opts?.walkFrameIndex === 'number'
+        ? opts.walkFrameIndex
+        : Math.floor((reducedMotion ? t : animT) * (sprinting ? 11.5 : 7.5)))
     : 0;
-  const frame: 0 | 1 | 2 = walking && !reducedMotion ? WALK_SEQUENCE[cycleIndex] : 1;
+  const cycleIndex = ((rawCycleIndex % 4) + 4) % 4;
+  const frame: 0 | 1 | 2 = walking ? WALK_SEQUENCE[cycleIndex] : 1;
 
   const idleBreath = !walking && !reducedMotion && Math.sin(animT * 2.6) > 0.72 ? 1 : 0;
   const idleBlink = !walking && !reducedMotion && (animT % 4.8) > 4.64;
@@ -1773,14 +1824,14 @@ export function renderPixelVxAce4Dir(
 
   // 1. Sombra pixelada escalonada de contacto en el suelo (coherente con VX Ace).
   // Durante la caminata el apoyo alterna: la sombra acompaña levemente la zancada.
-  const strideBias = walking && !reducedMotion ? (frame === 0 ? -1 : frame === 2 ? 1 : 0) : 0;
+  const strideBias = walking && !reducedMotion ? (frame === 0 ? -2 : frame === 2 ? 2 : 0) : 0;
   ctx.fillStyle = 'rgba(6, 10, 18, 0.24)';
   ctx.fillRect(rx - 9 + strideBias, ry, 18, 4);
   ctx.fillStyle = 'rgba(6, 10, 18, 0.42)';
   ctx.fillRect(rx - 6 + strideBias, ry + 1, 12, 3);
   if (walking && !reducedMotion) {
     // Huella de contacto del pie que apoya, para reforzar el paso.
-    const plantedX = frame === 2 ? 3 : -3;
+    const plantedX = frame === 2 ? 4 : -4;
     ctx.fillStyle = 'rgba(6, 10, 18, 0.34)';
     ctx.fillRect(rx + plantedX - 2, ry + 2, 5, 2);
   }

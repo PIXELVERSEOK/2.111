@@ -1030,10 +1030,12 @@ export default function App() {
   );
 
   // Noche del prólogo: la tormenta cubre la Isla Natal desde que Pixel sale de
-  // su casa. Termina definitivamente cuando el enviado se marcha y la nube
-  // negra se disipa; una vez marcada, no vuelve al entrar o salir de la casa.
+  // su casa. Termina definitivamente cuando el enviado se marcha: la bandera
+  // narrativa se registra en ese instante (no con un temporizador) y la lluvia
+  // no vuelve al entrar o salir de la casa ni al recargar la partida.
   const prologueNightActive =
     progressState.island70s.narrativeEvents.includes('prologo-dormitorio-despertar') &&
+    !progressState.island70s.narrativeEvents.includes(ISLA_NATAL_FLAGS.travelerWarning) &&
     !progressState.island70s.narrativeEvents.includes(ISLA_NATAL_FLAGS.stormCleared) &&
     !progressState.island70s.narrativeEvents.includes(ISLA_NATAL_FLAGS.pongWon) &&
     !islaNatalCompleted;

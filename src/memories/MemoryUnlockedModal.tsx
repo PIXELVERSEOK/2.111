@@ -80,8 +80,10 @@ export function MemoryUnlockedModal({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!ceremonyReady) return;
-      if (e.key === 'Enter') {
+      if (!ceremonyReady || e.repeat) return;
+      const key = e.key.toLowerCase();
+      // E, Espacio y Enter confirman la memoria restaurada.
+      if (key === 'enter' || key === 'e' || key === ' ') {
         e.preventDefault();
         handleConfirmContinue();
       }

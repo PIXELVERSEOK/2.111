@@ -21,8 +21,9 @@ import {
   drawGbcWoodenSign,
   drawPongHoverboard,
   drawRpgTreasureChest,
-  isWorldBoxVisible,
+  isWorldBoxVisible as isWorldBoxVisibleRaw,
 } from './island70sRenderer';
+import { StaticChunkCache } from './staticChunkCache';
 import {
   ISLA_NATAL_ARCADE_ANCHOR,
   ISLA_NATAL_BOULDERS,
@@ -48,6 +49,7 @@ import {
   isIslaNatalPointOnPath,
   isIslaNatalPointBlockedBySolid,
   type IslaNatalClutter,
+  type IslaNatalGardenStage,
   type IslaNatalPathPlaza,
   type IslaNatalPathRoute,
   type IslaNatalPathTextureId,
@@ -60,7 +62,6 @@ import {
   subdivideClosedCatmullRom,
   type Vec2,
 } from './islaNatalCoast';
-
 export type ArcadeCabinetState = 'dusty' | 'powered' | 'won';
 
 export interface IslaNatalParticle {
@@ -91,6 +92,8 @@ export interface IslaNatalPlayerRender {
   ridingPaddle: boolean;
   /** Inclinación de la tabla al surfear (radianes). */
   rideTilt: number;
+  /** Tiempo de marcha derivado de la distancia real (sistema compartido). */
+  walkFrameIndex?: number;
 }
 
 export interface IslaNatalRenderParams {
@@ -117,6 +120,8 @@ export interface IslaNatalRenderParams {
   particles: IslaNatalParticle[];
   prompt: IslaNatalPromptSpec | null;
   shockwaves: { x: number; y: number; t: number; life: number }[];
+  /** Estado de crecimiento de la huerta central, persistido en las banderas. */
+  gardenStage?: IslaNatalGardenStage;
   /** Escena del viajero del futuro: fase y segundos transcurridos dentro de ella. */
   travelerEvent?: {
     phase: 'storm' | 'arrival' | 'descend' | 'talk' | 'board' | 'departure';
@@ -128,6 +133,12 @@ export interface IslaNatalRenderParams {
   surprise?: boolean;
   /** Noche de tormenta del prólogo: destello actual (0..1) y tiempo de escena. */
   nightStorm?: { t: number; flash: number; fade?: number } | null;
+  /**
+   * Calidad adaptativa de efectos secundarios (0 = plena, 2 = mínima).
+   * Nunca cambia la resolución ni la identidad visual del mapa; sólo ajusta
+   * densidad de destellos, espuma lejana, motas y capas atmosféricas.
+   */
+  quality?: 0 | 1 | 2;
 }
 
 const CELL = 32;
@@ -143,6 +154,91 @@ const NET_POS = { x: 1036, y: 1340 };
 const SHELLS_POI_POS = { x: 1318, y: 1358 };
 const MAILBOX_POS = { x: 742, y: 1050 };
 const MIRADOR_POS = { x: 616, y: 424 };
+
+/**
+ * Recorte de Isla Natal. El helper compartido usa 160 px de margen, pensados
+ * para mapas de cámara más abiertos: aquí dibujaba matorrales, matas y árboles
+ * de casi una pantalla entera fuera de cuadro. 56 px cubren de sobra las
+ * sombras y copas que asoman por los bordes sin multiplicar el trabajo.
+ */
+const NATAL_CULL_PAD = 56;
+function isWorldBoxVisible(
+  wx: number,
+  wy: number,
+  ww: number,
+  wh: number,
+  camX: number,
+  camY: number,
+  vw: number,
+  vh: number
+): boolean {
+  return isWorldBoxVisibleRaw(wx, wy, ww, wh, camX, camY, vw, vh, NATAL_CULL_PAD);
+}
+
+/**
+ * Patrones de textura reutilizables. Antes se instanciaba un `CanvasPattern`
+ * nuevo para el mar, los tejados y los tablones en cada cuadro.
+ */
+const natalPatternCache = new WeakMap<
+  CanvasRenderingContext2D,
+  WeakMap<HTMLImageElement | HTMLCanvasElement, CanvasPattern>
+>();
+
+function getCachedPattern(
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement | HTMLCanvasElement
+): CanvasPattern | null {
+  let bucket = natalPatternCache.get(ctx);
+  if (!bucket) {
+    bucket = new WeakMap();
+    natalPatternCache.set(ctx, bucket);
+  }
+  const cached = bucket.get(image);
+  if (cached) return cached;
+  const pattern = ctx.createPattern(image, 'repeat');
+  if (pattern) bucket.set(image, pattern);
+  return pattern;
+}
+
+/**
+ * Degradados estáticos (luz de la cabaña, sol, viñeta, neblina). Se construyen
+ * una vez y se reutilizan; antes se recalculaban en cada cuadro.
+ */
+const natalGradientCache = new Map<string, CanvasGradient>();
+
+function getCachedLinearGradient(
+  ctx: CanvasRenderingContext2D,
+  key: string,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  stops: ReadonlyArray<readonly [number, string]>
+): CanvasGradient {
+  const cached = natalGradientCache.get(key);
+  if (cached) return cached;
+  const gradient = ctx.createLinearGradient(x0, y0, x1, y1);
+  for (const [offset, color] of stops) gradient.addColorStop(offset, color);
+  natalGradientCache.set(key, gradient);
+  return gradient;
+}
+
+function getCachedRadialGradient(
+  ctx: CanvasRenderingContext2D,
+  key: string,
+  cx: number,
+  cy: number,
+  r0: number,
+  r1: number,
+  stops: ReadonlyArray<readonly [number, string]>
+): CanvasGradient {
+  const cached = natalGradientCache.get(key);
+  if (cached) return cached;
+  const gradient = ctx.createRadialGradient(cx, cy, r0, cx, cy, r1);
+  for (const [offset, color] of stops) gradient.addColorStop(offset, color);
+  natalGradientCache.set(key, gradient);
+  return gradient;
+}
 
 
 
@@ -630,6 +726,24 @@ function poblarArbustos() {
 }
 
 poblarArbustos();
+
+/**
+ * Las matas, flores y arbustos son estáticos: su superficie y su relación con
+ * los senderos se resuelven una sola vez al cargar el módulo. Antes se repetían
+ * cientos de pruebas de polígono dentro de cada cuadro.
+ */
+const NATAL_MEADOW_TUFTS = ISLA_NATAL_TUFTS.filter((t) =>
+  isPointOnNatalMeadow(t.x, t.y)
+);
+const NATAL_MEADOW_FLOWERS = ISLA_NATAL_FLOWERS.filter((f) =>
+  isPointOnNatalMeadow(f.x, f.y)
+);
+const NATAL_RENDER_BUSHES = NATAL_BUSHES.filter(
+  (b) => !isIslaNatalPointOnPath(b.x, b.y)
+);
+const NATAL_RENDER_PATH_BUSHES = NATAL_PATH_SIDE_BUSHES.filter(
+  (b) => !isIslaNatalPointOnPath(b.x, b.y)
+);
 
 /* ------------------------------------------------------------------ */
 /* TERRENO PRERENDERIZADO: MÁSCARA DE COSTA Y TEXTURAS ARTESANALES    */
@@ -3983,17 +4097,29 @@ function drawOcean(
   elapsed: number,
   animFrame4: number,
   charge: number,
-  reducedMotion: boolean
+  reducedMotion: boolean,
+  quality: 0 | 1 | 2
 ): void {
   const waterTiles = ensureNatalWaterTiles();
 
-  // 1. Fondo de mar profundo con gradiente
-  const depth = ctx.createLinearGradient(0, camY, 0, camY + vh);
-  depth.addColorStop(0, '#0c3452');
-  depth.addColorStop(0.42, '#092b47');
-  depth.addColorStop(1, '#051c31');
-  ctx.fillStyle = depth;
-  ctx.fillRect(camX, camY, vw, vh);
+  // 1. Fondo de mar profundo con gradiente (cacheado por alto de vista)
+  ctx.save();
+  ctx.translate(camX, camY);
+  ctx.fillStyle = getCachedLinearGradient(
+    ctx,
+    `ocean-depth:${Math.round(vh)}`,
+    0,
+    0,
+    0,
+    vh,
+    [
+      [0, '#0c3452'],
+      [0.42, '#092b47'],
+      [1, '#051c31'],
+    ]
+  );
+  ctx.fillRect(0, 0, vw, vh);
+  ctx.restore();
 
   // 2. Textura de superficie de agua (E_32b551ca.jpg)
   if (waterTiles.surface) {
@@ -4001,7 +4127,7 @@ function drawOcean(
     const surfaceScale = 2.4;
     const scrollX = reducedMotion ? 0 : elapsed * 8;
     const scrollY = reducedMotion ? 0 : elapsed * 3;
-    const pattern = ctx.createPattern(waterTiles.surface, 'repeat');
+    const pattern = getCachedPattern(ctx, waterTiles.surface);
     if (pattern) {
       ctx.globalAlpha = 0.42;
       const matrix = new DOMMatrix();
@@ -4014,14 +4140,15 @@ function drawOcean(
     ctx.restore();
   }
 
-  // 3. Cáusticas y reflejos (images_a679ab2f.jpg)
-  if (waterTiles.caustics) {
+  // 3. Cáusticas y reflejos (images_a679ab2f.jpg). Con calidad mínima se
+  //    omiten: el agua conserva gradiente y textura de superficie.
+  if (waterTiles.caustics && quality < 2) {
     ctx.save();
     ctx.globalCompositeOperation = 'screen';
     const causticScale = 1.8;
     const scrollX = reducedMotion ? 0 : Math.sin(elapsed * 0.5) * 15;
     const scrollY = reducedMotion ? 0 : elapsed * 12;
-    const pattern = ctx.createPattern(waterTiles.caustics, 'repeat');
+    const pattern = getCachedPattern(ctx, waterTiles.caustics);
     if (pattern) {
       ctx.globalAlpha = 0.18 + Math.sin(elapsed * 1.2) * 0.04;
       const matrix = new DOMMatrix();
@@ -4034,13 +4161,24 @@ function drawOcean(
     ctx.restore();
   }
 
-  // 4. Luz cálida del oeste
-  const westGlow = ctx.createLinearGradient(camX, 0, camX + vw * 0.6, 0);
-  westGlow.addColorStop(0, 'rgba(255, 176, 108, 0.08)');
-  westGlow.addColorStop(0.55, 'rgba(255, 162, 98, 0.03)');
-  westGlow.addColorStop(1, 'rgba(255, 150, 90, 0)');
-  ctx.fillStyle = westGlow;
-  ctx.fillRect(camX, camY, vw * 0.6, vh);
+  // 4. Luz cálida del oeste (gradiente cacheado por ancho de vista)
+  ctx.save();
+  ctx.translate(camX, camY);
+  ctx.fillStyle = getCachedLinearGradient(
+    ctx,
+    `ocean-west:${Math.round(vw)}`,
+    0,
+    0,
+    vw * 0.6,
+    0,
+    [
+      [0, 'rgba(255, 176, 108, 0.08)'],
+      [0.55, 'rgba(255, 162, 98, 0.03)'],
+      [1, 'rgba(255, 150, 90, 0)'],
+    ]
+  );
+  ctx.fillRect(0, 0, vw * 0.6, vh);
+  ctx.restore();
 
 }
 
@@ -4054,7 +4192,8 @@ function drawLandmass(
   camY: number,
   vw: number,
   vh: number,
-  elapsed: number
+  elapsed: number,
+  quality: 0 | 1 | 2
 ): void {
   const layer = ensureCoastLayer();
 
@@ -4075,7 +4214,7 @@ function drawLandmass(
     }
   }
 
-  drawShoreWater(ctx, camX, camY, vw, vh, elapsed);
+  drawShoreWater(ctx, camX, camY, vw, vh, elapsed, quality);
 }
 
 /** Brillo, ondulación y espuma animada sobre la costa prerenderizada. */
@@ -4085,7 +4224,8 @@ function drawShoreWater(
   camY: number,
   vw: number,
   vh: number,
-  elapsed: number
+  elapsed: number,
+  quality: 0 | 1 | 2
 ): void {
   const field = coastField;
   if (!field) return;
@@ -4094,25 +4234,32 @@ function drawShoreWater(
   const grid = 14;
   const gx0 = Math.floor(camX / grid) * grid;
   const gy0 = Math.floor(camY / grid) * grid;
+  // La calidad adaptativa descarta sólo los destellos más tenues.
+  const shimmerCut = 0.82 + quality * 0.04;
+  ctx.fillStyle = 'rgb(196, 255, 249)';
   for (let wy = gy0; wy < camY + vh + grid; wy += grid) {
     for (let wx = gx0; wx < camX + vw + grid; wx += grid) {
       const th = hash2(wx + 61, wy - 37);
-      if (th < 0.82) continue;
+      if (th < shimmerCut) continue;
       const d = sampleDistancePx(field, wx + 7, wy + 7);
       if (d < 2 || d > 46) continue;
       const shimmer = Math.sin(elapsed * 2.1 + th * 34 + d * 0.18);
       if (shimmer < 0.15) continue;
-      const alpha = 0.1 + (shimmer + 0.5) * 0.2;
-      ctx.fillStyle = `rgba(196, 255, 249, ${alpha.toFixed(3)})`;
+      // globalAlpha evita crear una cadena rgba por destello y por cuadro.
+      ctx.globalAlpha = 0.1 + (shimmer + 0.5) * 0.2;
       const len = 3 + Math.floor(th * 5);
       ctx.fillRect(wx + Math.floor(th * 8), wy + Math.floor(th * 10), len, 1);
     }
   }
+  ctx.globalAlpha = 1;
 
   // Rompiente: espuma que sube y baja siguiendo el contorno real de la isla.
   const foam = coastFoam;
   for (let i = 0; i < foam.length; i++) {
     const f = foam[i];
+    // La espuma lejana (banda 3) sólo se pinta con calidad plena.
+    if (f.band >= 3 && quality > 0) continue;
+    if (f.band === 2 && quality > 1 && f.seed < 0.4) continue;
     if (!isWorldBoxVisible(f.x - 14, f.y - 14, 28, 28, camX, camY, vw, vh)) continue;
     const wave = Math.sin(elapsed * (1.5 + f.band * 0.18) + f.phase);
     const tide = wave * (1.3 + f.band * 0.7);
@@ -4121,45 +4268,50 @@ function drawShoreWater(
 
     if (f.band === 0) {
       // Lengua de espuma que lame la arena.
-      const a = 0.28 + Math.max(0, wave) * 0.55;
-      ctx.fillStyle = `rgba(255, 255, 255, ${a.toFixed(3)})`;
+      ctx.fillStyle = 'rgb(255, 255, 255)';
+      ctx.globalAlpha = 0.28 + Math.max(0, wave) * 0.55;
       if (f.horiz) ctx.fillRect(x, y, 7, 2);
       else ctx.fillRect(x, y, 2, 6);
       if (f.seed > 0.62) {
-        ctx.fillStyle = 'rgba(190, 246, 236, 0.75)';
+        ctx.fillStyle = 'rgb(190, 246, 236)';
+        ctx.globalAlpha = 0.75;
         if (f.horiz) ctx.fillRect(x + 2, y - 1, 3, 1);
         else ctx.fillRect(x - 1, y + 1, 1, 3);
       }
     } else if (f.band === 1) {
-      const a = 0.16 + Math.max(0, wave) * 0.34;
-      ctx.fillStyle = `rgba(232, 255, 250, ${a.toFixed(3)})`;
+      ctx.fillStyle = 'rgb(232, 255, 250)';
+      ctx.globalAlpha = 0.16 + Math.max(0, wave) * 0.34;
       if (f.horiz) ctx.fillRect(x, y, 8, 1);
       else ctx.fillRect(x, y, 1, 7);
     } else if (f.band === 2) {
-      const a = 0.08 + Math.max(0, wave) * 0.18;
-      ctx.fillStyle = `rgba(190, 240, 236, ${a.toFixed(3)})`;
+      ctx.fillStyle = 'rgb(190, 240, 236)';
+      ctx.globalAlpha = 0.08 + Math.max(0, wave) * 0.18;
       if (f.horiz) ctx.fillRect(x, y, 5, 1);
       else ctx.fillRect(x, y, 1, 5);
     } else if (wave > 0.5) {
-      ctx.fillStyle = `rgba(220, 250, 246, ${(0.05 + wave * 0.1).toFixed(3)})`;
+      ctx.fillStyle = 'rgb(220, 250, 246)';
+      ctx.globalAlpha = 0.05 + wave * 0.1;
       if (f.horiz) ctx.fillRect(x, y, 4, 1);
       else ctx.fillRect(x, y, 1, 4);
     }
   }
+  ctx.globalAlpha = 1;
 
   // Sheen dorado del atardecer sobre el agua que roza la costa oeste: une el
   // reflejo del sol con la rompiente y evita que la orilla quede fría.
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = 'rgb(255, 214, 148)';
   for (let i = 0; i < foam.length; i++) {
     const f = foam[i];
     if (f.x > 920) continue;
+    if (quality > 1 && (i & 1) === 0) continue;
     const dy = Math.abs(f.y - 588);
     if (dy > 250) continue;
     const flick = 0.55 + Math.sin(elapsed * 1.35 + f.phase) * 0.45;
     const a = (1 - dy / 250) * 0.13 * flick;
     if (a <= 0.004) continue;
-    ctx.fillStyle = `rgba(255, 214, 148, ${a.toFixed(3)})`;
+    ctx.globalAlpha = a;
     if (f.horiz) ctx.fillRect(Math.round(f.x - 2), Math.round(f.y - 1), 7, 1);
     else ctx.fillRect(Math.round(f.x - 1), Math.round(f.y - 3), 1, 7);
   }
@@ -4174,7 +4326,8 @@ function drawTuft(ctx: CanvasRenderingContext2D, x: number, y: number, seed: num
   const h = 3 + Math.floor(seed * 6);
   const kind = Math.floor(hash2(x, y) * 3);
 
-  // Sombra profunda de contacto en la raíz
+  // Sombra profunda de contacto en la raíz. Cada grupo de briznas del mismo
+  // color se acumula en un solo path: mismo resultado, muchas menos llamadas.
   ctx.fillStyle = 'rgba(6, 22, 10, 0.48)';
   ctx.fillRect(x - 3, y, 7, 2);
   ctx.fillStyle = 'rgba(4, 16, 8, 0.60)';
@@ -4184,15 +4337,21 @@ function drawTuft(ctx: CanvasRenderingContext2D, x: number, y: number, seed: num
   // campo no repite la misma silueta por todas partes.
   if (kind === 0) {
     ctx.fillStyle = seed > 0.5 ? '#356f36' : '#3d7c3c';
-    ctx.fillRect(x - 3, y - h + 2, 1, h - 1);
-    ctx.fillRect(x + 3, y - h + 1, 1, h - 1);
+    ctx.beginPath();
+    ctx.rect(x - 3, y - h + 2, 1, h - 1);
+    ctx.rect(x + 3, y - h + 1, 1, h - 1);
+    ctx.fill();
     ctx.fillStyle = seed > 0.5 ? '#5fae4e' : '#4f9a45';
-    ctx.fillRect(x - 2, y - h, 1, h);
-    ctx.fillRect(x + 2, y - h + 1, 1, h - 1);
+    ctx.beginPath();
+    ctx.rect(x - 2, y - h, 1, h);
+    ctx.rect(x + 2, y - h + 1, 1, h - 1);
+    ctx.fill();
     ctx.fillStyle = seed > 0.5 ? '#7fcb66' : '#6db95a';
-    ctx.fillRect(x - 1 + sway, y - h, 1, h - 1);
-    ctx.fillRect(x + 1 + sway, y - h - 1, 1, h);
-    ctx.fillRect(x + sway, y - h + 2, 1, h - 3);
+    ctx.beginPath();
+    ctx.rect(x - 1 + sway, y - h, 1, h - 1);
+    ctx.rect(x + 1 + sway, y - h - 1, 1, h);
+    ctx.rect(x + sway, y - h + 2, 1, h - 3);
+    ctx.fill();
     if (seed > 0.78) {
       ctx.fillStyle = '#a5dc7f';
       ctx.fillRect(x + 1 + sway, y - h - 1, 1, 1);
@@ -4208,11 +4367,15 @@ function drawTuft(ctx: CanvasRenderingContext2D, x: number, y: number, seed: num
   } else {
     // Brote doble, más oscuro y discreto.
     ctx.fillStyle = '#356f36';
-    ctx.fillRect(x - 2, y - h + 2, 1, h - 2);
-    ctx.fillRect(x + 1, y - h + 1, 1, h - 1);
+    ctx.beginPath();
+    ctx.rect(x - 2, y - h + 2, 1, h - 2);
+    ctx.rect(x + 1, y - h + 1, 1, h - 1);
+    ctx.fill();
     ctx.fillStyle = '#549e44';
-    ctx.fillRect(x - 1 + sway, y - h, 1, h - 1);
-    ctx.fillRect(x + 2 + sway, y - h + 1, 1, h - 2);
+    ctx.beginPath();
+    ctx.rect(x - 1 + sway, y - h, 1, h - 1);
+    ctx.rect(x + 2 + sway, y - h + 1, 1, h - 2);
+    ctx.fill();
   }
 }
 
@@ -4220,15 +4383,19 @@ function drawFlower(ctx: CanvasRenderingContext2D, x: number, y: number, seed: n
   ctx.fillStyle = 'rgba(30, 68, 32, 0.35)';
   ctx.fillRect(x - 1, y, 4, 1);
   ctx.fillStyle = '#3f8a41';
-  ctx.fillRect(x, y - 4, 1, 4);
-  ctx.fillRect(x + 1, y - 2, 2, 1);
+  ctx.beginPath();
+  ctx.rect(x, y - 4, 1, 4);
+  ctx.rect(x + 1, y - 2, 2, 1);
+  ctx.fill();
   const petal = seed > 0.8 ? '#f9a8d4' : seed > 0.55 ? '#fde68a' : seed > 0.42 ? '#f8fafc' : '#c4b5fd';
   ctx.fillStyle = petal;
-  ctx.fillRect(x - 1, y - 6, 3, 1);
-  ctx.fillRect(x - 1, y - 5, 1, 3);
-  ctx.fillRect(x + 1, y - 5, 1, 3);
-  ctx.fillRect(x, y - 7, 1, 1);
-  ctx.fillRect(x, y - 3, 1, 1);
+  ctx.beginPath();
+  ctx.rect(x - 1, y - 6, 3, 1);
+  ctx.rect(x - 1, y - 5, 1, 3);
+  ctx.rect(x + 1, y - 5, 1, 3);
+  ctx.rect(x, y - 7, 1, 1);
+  ctx.rect(x, y - 3, 1, 1);
+  ctx.fill();
   ctx.fillStyle = seed > 0.5 ? '#fbbf24' : '#f59e0b';
   ctx.fillRect(x, y - 5, 1, 1);
   ctx.fillStyle = 'rgba(255,255,255,0.6)';
@@ -4325,12 +4492,13 @@ export function drawEntityDynamicShadow(
   const rx = Math.max(2.5, baseRx * depthScale);
   const ry = Math.max(1.2, baseRy * depthScale);
 
-  ctx.save();
+  // Sin save/restore: sólo se altera fillStyle, que se devuelve tal cual estaba.
+  const prevFill = ctx.fillStyle;
   ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
   ctx.beginPath();
   ctx.ellipse(Math.round(x), Math.round(y), rx, ry, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.restore();
+  ctx.fillStyle = prevFill;
 }
 
 let natalHuertaSprite: HTMLImageElement | null = null;
@@ -4347,157 +4515,365 @@ function ensureNatalHuertaSprite(): HTMLImageElement | null {
     : null;
 }
 
+/* ------------------------------------------------------------------ */
+/* HUERTA CENTRAL · CRUCERO DE LOS CUATRO CAMINOS                     */
+/* ------------------------------------------------------------------ */
+
+/** Interior cultivable del sprite de la huerta (coordenadas locales). */
+const HUERTA_INNER = { cx: 160, cy: 122, rx: 104, ry: 74 };
+/** Cruce del pasillo central, alineado con la puerta sur y el sendero. */
+const HUERTA_CROSS = { halfV: 18, halfH: 4, top: 130, bottom: 138 };
+/** La puerta del cerco se deja libre en primer plano para poder cruzar. */
+const HUERTA_GATE_LOCAL = { x0: 134, x1: 186 };
+
+type HuertaQuadrant = 'nw' | 'ne' | 'sw' | 'se';
+
+const HUERTA_QUADRANTS: HuertaQuadrant[] = ['nw', 'ne', 'sw', 'se'];
+
+const HUERTA_BED_BOUNDS: Record<HuertaQuadrant, { x: number; y: number; w: number; h: number }> = {
+  nw: { x: 48, y: 44, w: 96, h: 88 },
+  ne: { x: 176, y: 44, w: 96, h: 88 },
+  sw: { x: 48, y: 130, w: 96, h: 74 },
+  se: { x: 176, y: 130, w: 96, h: 74 },
+};
+
+function huertaBedAngles(quadrant: HuertaQuadrant): { from: number; to: number; ccw: boolean } {
+  const vx = HUERTA_CROSS.halfV / HUERTA_INNER.rx;
+  const top = -Math.sqrt(1 - vx * vx);
+  const upperSplit = (HUERTA_CROSS.top - HUERTA_INNER.cy) / HUERTA_INNER.ry;
+  const lowerSplit = (HUERTA_CROSS.bottom - HUERTA_INNER.cy) / HUERTA_INNER.ry;
+  const upperSide = -Math.sqrt(1 - upperSplit * upperSplit);
+  const lowerSide = -Math.sqrt(1 - lowerSplit * lowerSplit);
+  switch (quadrant) {
+    case 'nw':
+      return { from: Math.atan2(top, -vx), to: Math.atan2(upperSplit, upperSide), ccw: true };
+    case 'ne':
+      return { from: Math.atan2(top, vx), to: Math.atan2(upperSplit, -upperSide), ccw: false };
+    case 'sw':
+      return { from: Math.atan2(-top, -vx), to: Math.atan2(lowerSplit, lowerSide), ccw: false };
+    default:
+      return { from: Math.atan2(-top, vx), to: Math.atan2(lowerSplit, -lowerSide), ccw: true };
+  }
+}
+
+function traceHuertaBed(ctx: CanvasRenderingContext2D, quadrant: HuertaQuadrant): void {
+  const { cx, cy, rx, ry } = HUERTA_INNER;
+  const angles = huertaBedAngles(quadrant);
+  const innerX =
+    quadrant === 'nw' || quadrant === 'sw' ? cx - HUERTA_CROSS.halfV : cx + HUERTA_CROSS.halfV;
+  const innerY =
+    quadrant === 'nw' || quadrant === 'ne' ? HUERTA_CROSS.top : HUERTA_CROSS.bottom;
+  ctx.beginPath();
+  ctx.moveTo(cx + Math.cos(angles.from) * rx, cy + Math.sin(angles.from) * ry);
+  ctx.ellipse(cx, cy, rx, ry, 0, angles.from, angles.to, angles.ccw);
+  ctx.lineTo(innerX, innerY);
+  ctx.closePath();
+}
+
+function isInsideHuertaBed(
+  x: number,
+  y: number,
+  quadrant: HuertaQuadrant,
+  shrink = 0.94
+): boolean {
+  const dx = (x - HUERTA_INNER.cx) / HUERTA_INNER.rx;
+  const dy = (y - HUERTA_INNER.cy) / HUERTA_INNER.ry;
+  if (dx * dx + dy * dy > shrink * shrink) return false;
+  switch (quadrant) {
+    case 'nw':
+      return x <= HUERTA_INNER.cx - HUERTA_CROSS.halfV && y <= HUERTA_CROSS.top;
+    case 'ne':
+      return x >= HUERTA_INNER.cx + HUERTA_CROSS.halfV && y <= HUERTA_CROSS.top;
+    case 'sw':
+      return x <= HUERTA_INNER.cx - HUERTA_CROSS.halfV && y >= HUERTA_CROSS.bottom;
+    default:
+      return x >= HUERTA_INNER.cx + HUERTA_CROSS.halfV && y >= HUERTA_CROSS.bottom;
+  }
+}
+
 /**
- * Dibuja la Huerta Central sobre el claro del anillo de caminos.
- * Usa el sprite pixel-art de la huerta cerrada; si aún no cargó, mantiene el
- * respaldo procedural de surcos y hortalizas dentro de HUERTA_RECT.
+ * Brote tierno de la huerta: tallo corto, hojas nuevas y ningún fruto maduro.
+ * El estado «ready» sólo adelanta un poco el tamaño; la cosecha sigue siendo
+ * una acción futura.
  */
-function drawHuertaGarden(
+function drawHuertaSprout(
   ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  seed: number,
+  stage: IslaNatalGardenStage
+): void {
+  const ready = stage === 'ready';
+  const height = ready ? 8 : 5 + Math.floor(seed * 2);
+  ctx.fillStyle = 'rgba(16, 10, 5, 0.28)';
+  ctx.beginPath();
+  ctx.ellipse(x, y + 1, 3.2, 1.35, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = seed > 0.55 ? '#3f7f2c' : '#356f28';
+  ctx.fillRect(x, y - height, 1, height + 1);
+
+  const leaf = seed > 0.7 ? '#8ed35f' : seed > 0.36 ? '#67bd4a' : '#4fa63c';
+  const leafDark = '#2d6526';
+  const spread = ready ? 4 : 3;
+  ctx.fillStyle = leafDark;
+  ctx.fillRect(x - spread, y - height + 1, spread, 2);
+  ctx.fillRect(x + 1, y - height, spread, 2);
+  ctx.fillStyle = leaf;
+  ctx.fillRect(x - spread, y - height, spread, 1);
+  ctx.fillRect(x + 1, y - height - 1, spread, 1);
+  if (seed > 0.48) {
+    ctx.fillStyle = leaf;
+    ctx.fillRect(x - 2, y - height - 3, 2, 2);
+    ctx.fillRect(x + 1, y - height - 3, 2, 2);
+  }
+  if (ready && seed > 0.62) {
+    ctx.fillStyle = seed > 0.82 ? '#f3d27a' : '#b7dd6d';
+    ctx.fillRect(x - 1, y - height - 1, 2, 1);
+  }
+}
+
+function paintHuertaBed(
+  ctx: CanvasRenderingContext2D,
+  quadrant: HuertaQuadrant,
+  index: number,
+  stage: IslaNatalGardenStage
+): void {
+  const bounds = HUERTA_BED_BOUNDS[quadrant];
+
+  traceHuertaBed(ctx, quadrant);
+  ctx.fillStyle = '#24170e';
+  ctx.fill();
+
+  ctx.save();
+  traceHuertaBed(ctx, quadrant);
+  ctx.clip();
+  ctx.fillStyle = '#402b1b';
+  ctx.fillRect(bounds.x, bounds.y, bounds.w, bounds.h);
+
+  let rowIndex = 0;
+  for (let rowY = bounds.y + 5; rowY < bounds.y + bounds.h - 2; rowY += 12, rowIndex++) {
+    ctx.fillStyle = '#2a1a10';
+    ctx.fillRect(bounds.x, rowY, bounds.w, 5);
+    ctx.fillStyle = '#4c3522';
+    ctx.fillRect(bounds.x, rowY + 1, bounds.w, 3);
+    ctx.fillStyle = '#5f442b';
+    ctx.fillRect(bounds.x + 2, rowY + 1, bounds.w - 4, 1);
+
+    const offset = ((rowIndex + index) % 2) * 5;
+    for (let px = bounds.x + 7 + offset; px < bounds.x + bounds.w - 3; px += 16) {
+      if (!isInsideHuertaBed(px, rowY + 2, quadrant, 0.92)) continue;
+      drawHuertaSprout(ctx, px, rowY + 1, hash2(px + index * 41, rowY), stage);
+    }
+  }
+
+  // Matas espontáneas, piedritas y florecillas de borde: vida sin cosecha.
+  for (let i = 0; i < 5; i++) {
+    const fx = bounds.x + 4 + hash2(index * 53 + i * 9, 7) * (bounds.w - 8);
+    const fy = bounds.y + 6 + hash2(index * 71 + i * 13, 19) * (bounds.h - 12);
+    if (!isInsideHuertaBed(fx, fy, quadrant, 0.88)) continue;
+    ctx.fillStyle = i % 2 === 0 ? '#3f7a30' : '#568f3a';
+    ctx.fillRect(Math.round(fx), Math.round(fy), 2, 1);
+    if (i % 3 === 0) {
+      ctx.fillStyle = '#e8dfa0';
+      ctx.fillRect(Math.round(fx) + 1, Math.round(fy) - 1, 1, 1);
+    }
+  }
+  ctx.restore();
+
+  traceHuertaBed(ctx, quadrant);
+  ctx.strokeStyle = 'rgba(20, 12, 7, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function paintHuertaAisle(ctx: CanvasRenderingContext2D): void {
+  const { cx, cy, rx, ry } = HUERTA_INNER;
+  const aisleX = cx - HUERTA_CROSS.halfV;
+  const aisleW = HUERTA_CROSS.halfV * 2;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.clip();
+
+  // Cruce horizontal entre los cuatro canteros.
+  ctx.fillStyle = '#4a3421';
+  ctx.fillRect(56, HUERTA_CROSS.top, 208, HUERTA_CROSS.bottom - HUERTA_CROSS.top);
+  ctx.fillStyle = '#5f4629';
+  ctx.fillRect(58, HUERTA_CROSS.top + 1, 204, HUERTA_CROSS.bottom - HUERTA_CROSS.top - 2);
+
+  // Pasillo principal: une la puerta sur con el cruce y el fondo del claro.
+  ctx.fillStyle = '#553d26';
+  ctx.fillRect(aisleX, 44, aisleW, 160);
+  ctx.fillStyle = '#6d5133';
+  ctx.fillRect(aisleX + 2, 44, aisleW - 4, 160);
+  ctx.fillStyle = '#7c5f3d';
+  ctx.fillRect(cx - 2, 46, 4, 156);
+
+  // Losas de paso alternadas: el acceso se lee de un vistazo.
+  for (let i = 0, sy = 186; sy > 52; sy -= 16, i++) {
+    const sx = cx + (i % 2 === 0 ? -5 : 4);
+    ctx.fillStyle = '#3b2c1d';
+    ctx.fillRect(sx - 5, sy - 2, 10, 4);
+    ctx.fillStyle = '#93856c';
+    ctx.fillRect(sx - 4, sy - 2, 8, 3);
+    ctx.fillStyle = '#b1a285';
+    ctx.fillRect(sx - 3, sy - 2, 6, 1);
+  }
+  ctx.restore();
+
+  // Umbral de tierra que continúa hacia el sendero de la playa.
+  ctx.fillStyle = '#5e452b';
+  ctx.fillRect(aisleX, 192, aisleW, 32);
+  ctx.fillStyle = '#715536';
+  ctx.fillRect(aisleX + 2, 192, aisleW - 4, 30);
+  ctx.fillStyle = '#948772';
+  ctx.fillRect(cx - 14, 212, 12, 3);
+  ctx.fillRect(cx + 2, 222, 12, 3);
+}
+
+function paintHuertaComposite(
+  ctx: CanvasRenderingContext2D,
+  stage: IslaNatalGardenStage,
+  sprite: HTMLImageElement
+): void {
+  const { w, h } = HUERTA_SPRITE_RECT;
+  ctx.clearRect(0, 0, w, h);
+  ctx.imageSmoothingEnabled = false;
+
+  // Asiento suave en el césped para que el cerco no quede flotando.
+  ctx.fillStyle = 'rgba(12, 30, 14, 0.18)';
+  ctx.beginPath();
+  ctx.ellipse(HUERTA_INNER.cx, h - 14, 138, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.drawImage(sprite, 0, 0);
+
+  // El sprite original muestra la cosecha madura. Se repinta la tierra del
+  // claro para dejar la huerta sembrada y todavía en crecimiento.
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(HUERTA_INNER.cx, HUERTA_INNER.cy, HUERTA_INNER.rx, HUERTA_INNER.ry, 0, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = '#24170e';
+  ctx.fillRect(40, 40, 240, 164);
+  ctx.beginPath();
+  ctx.ellipse(
+    HUERTA_INNER.cx,
+    HUERTA_INNER.cy,
+    HUERTA_INNER.rx - 4,
+    HUERTA_INNER.ry - 4,
+    0,
+    0,
+    Math.PI * 2
+  );
+  ctx.fillStyle = '#382618';
+  ctx.fill();
+  for (let i = 0; i < 26; i++) {
+    const angle = hash2(i * 17 + 3, 11) * Math.PI * 2;
+    const radius = Math.sqrt(hash2(i * 29 + 5, 23)) * 0.92;
+    const px = HUERTA_INNER.cx + Math.cos(angle) * (HUERTA_INNER.rx - 6) * radius;
+    const py = HUERTA_INNER.cy + Math.sin(angle) * (HUERTA_INNER.ry - 6) * radius;
+    ctx.fillStyle = i % 3 === 0 ? '#45301e' : i % 3 === 1 ? '#2c1d12' : '#3e2b1a';
+    ctx.fillRect(Math.round(px), Math.round(py), 2 + (i % 3), 1 + (i % 2));
+  }
+  ctx.restore();
+
+  HUERTA_QUADRANTS.forEach((quadrant, index) => paintHuertaBed(ctx, quadrant, index, stage));
+  paintHuertaAisle(ctx);
+}
+
+const huertaCompositeCache = new Map<IslaNatalGardenStage, HTMLCanvasElement>();
+
+function getHuertaComposite(stage: IslaNatalGardenStage): HTMLCanvasElement | null {
+  const sprite = ensureNatalHuertaSprite();
+  if (!sprite || typeof document === 'undefined') return null;
+  const cached = huertaCompositeCache.get(stage);
+  if (cached) return cached;
+  const canvas = document.createElement('canvas');
+  canvas.width = HUERTA_SPRITE_RECT.w;
+  canvas.height = HUERTA_SPRITE_RECT.h;
+  const compositeCtx = canvas.getContext('2d');
+  if (!compositeCtx) return null;
+  compositeCtx.imageSmoothingEnabled = false;
+  paintHuertaComposite(compositeCtx, stage, sprite);
+  huertaCompositeCache.set(stage, canvas);
+  return canvas;
+}
+
+/** Capa de fondo de la huerta: cerco, tierra, canteros y pasillo central. */
+function drawHuertaGardenBackground(
+  ctx: CanvasRenderingContext2D,
+  stage: IslaNatalGardenStage,
   elapsed: number,
   reducedMotion: boolean
 ): void {
-  const sprite = ensureNatalHuertaSprite();
-  if (sprite) {
-    const { x, y, w, h } = HUERTA_SPRITE_RECT;
-    ctx.save();
-    ctx.imageSmoothingEnabled = false;
-    // Asiento suave en el césped para que el cerco no quede flotando.
-    ctx.fillStyle = 'rgba(12, 30, 14, 0.16)';
-    ctx.beginPath();
-    ctx.ellipse(x + w * 0.5, y + h - 10, w * 0.44, 9, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.drawImage(sprite, x, y, w, h);
-    ctx.restore();
+  const composite = getHuertaComposite(stage);
+  if (!composite) {
+    drawHuertaFallback(ctx, stage);
     return;
   }
+  const { x, y, w, h } = HUERTA_SPRITE_RECT;
+  ctx.drawImage(composite, x, y, w, h);
 
+  if (!reducedMotion) {
+    // Polen tenue sobre los surcos: vida mínima, sin alterar el arte.
+    ctx.fillStyle = 'rgba(244, 236, 190, 0.45)';
+    for (let i = 0; i < 3; i++) {
+      const px = x + 106 + Math.sin(elapsed * 0.42 + i * 2.1) * 56 + i * 20;
+      const py = y + 84 + Math.cos(elapsed * 0.31 + i * 1.7) * 22;
+      ctx.fillRect(Math.round(px), Math.round(py), 1, 1);
+    }
+  }
+}
+
+/**
+ * Cerco sur en primer plano: oculta a Pixel cuando está dentro de la huerta y
+ * deja libre el hueco de la puerta para entrar y salir sin engancharse.
+ */
+function drawHuertaFenceForeground(ctx: CanvasRenderingContext2D): void {
+  const sprite = ensureNatalHuertaSprite();
+  if (!sprite) return;
+  const { x, y, w, h } = HUERTA_SPRITE_RECT;
+  const top = y + 198;
+  const gapL = x + HUERTA_GATE_LOCAL.x0;
+  const gapR = x + HUERTA_GATE_LOCAL.x1;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, top, gapL - x, y + h - top);
+  ctx.rect(gapR, top, x + w - gapR, y + h - top);
+  ctx.clip();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(sprite, x, y, w, h);
+  ctx.restore();
+}
+
+function drawHuertaFallback(
+  ctx: CanvasRenderingContext2D,
+  stage: IslaNatalGardenStage
+): void {
   const { x, y, w, h } = HUERTA_RECT;
 
-  // 1. Parche de tierra fértil de la huerta (surcos)
-  ctx.fillStyle = '#261b11'; // Tierra húmeda profunda
+  ctx.fillStyle = '#2a1b10';
   ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = '#3d2b1b'; // Tierra abonada
+  ctx.fillStyle = '#3d2a19';
   ctx.fillRect(x + 2, y + 2, w - 4, h - 4);
 
-  // Surcos horizontales
-  const rows = [y + 16, y + 38, y + 60, y + 82];
-  for (const ry of rows) {
-    ctx.fillStyle = '#2d1e13';
-    ctx.fillRect(x + 6, ry - 3, w - 12, 10);
-    ctx.fillStyle = '#483422';
-    ctx.fillRect(x + 8, ry - 2, w - 16, 8);
-    ctx.fillStyle = '#5c432d';
-    ctx.fillRect(x + 10, ry - 2, w - 20, 2);
+  let row = 0;
+  for (let rowY = y + 8; rowY < y + h - 4; rowY += 13, row++) {
+    ctx.fillStyle = '#2a1a10';
+    ctx.fillRect(x + 5, rowY, w - 10, 5);
+    ctx.fillStyle = '#4c3522';
+    ctx.fillRect(x + 5, rowY + 1, w - 10, 3);
+    for (let px = x + 11 + (row % 2) * 6; px < x + w - 8; px += 17) {
+      drawHuertaSprout(ctx, px, rowY + 1, hash2(px, rowY), stage);
+    }
   }
 
-  // 2. Fila 1: Calabazas con enredaderas
-  const row1Y = rows[0] + 2;
-  for (let cx = x + 20; cx <= x + w - 20; cx += 28) {
-    // Sombra elíptica semitransparente (rgba(0,0,0,0.25)) calculada dinámicamente según Y
-    drawEntityDynamicShadow(ctx, cx + 2, row1Y + 3, 10, 5);
-
-    // Calabaza naranja brillante
-    ctx.fillStyle = '#1e381a';
-    ctx.fillRect(cx - 8, row1Y - 2, 16, 5);
-    ctx.fillStyle = '#d97706';
-    ctx.fillRect(cx - 5, row1Y - 4, 10, 7);
-    ctx.fillStyle = '#f59e0b';
-    ctx.fillRect(cx - 4, row1Y - 5, 8, 3);
-    ctx.fillStyle = '#78350f';
-    ctx.fillRect(cx, row1Y - 6, 2, 2);
-  }
-
-  // 3. Fila 2: Tomates con tutores de madera
-  const row2Y = rows[1] + 2;
-  for (let cx = x + 16; cx <= x + w - 16; cx += 22) {
-    // Sombra elíptica semitransparente (rgba(0,0,0,0.25)) calculada dinámicamente según Y
-    drawEntityDynamicShadow(ctx, cx + 2, row2Y + 4, 9, 4.5);
-
-    // Tutor de madera vertical
-    ctx.fillStyle = '#3a2414';
-    ctx.fillRect(cx, row2Y - 14, 2, 16);
-    ctx.fillStyle = '#784d2a';
-    ctx.fillRect(cx, row2Y - 14, 1, 16);
-
-    // Follaje tomatera
-    ctx.fillStyle = '#1e4d22';
-    ctx.fillRect(cx - 6, row2Y - 12, 12, 11);
-    ctx.fillStyle = '#34853b';
-    ctx.fillRect(cx - 5, row2Y - 11, 10, 8);
-
-    // Frutos rojos
-    ctx.fillStyle = '#ef4444';
-    ctx.fillRect(cx - 4, row2Y - 6, 3, 3);
-    ctx.fillRect(cx + 2, row2Y - 8, 3, 3);
-    ctx.fillRect(cx - 1, row2Y - 3, 3, 3);
-    ctx.fillStyle = '#fca5a5';
-    ctx.fillRect(cx - 4, row2Y - 6, 1, 1);
-    ctx.fillRect(cx + 2, row2Y - 8, 1, 1);
-  }
-
-  // 4. Fila 3: Mazorcas altas de maíz
-  const row3Y = rows[2] + 2;
-  const wind = reducedMotion ? 0 : Math.sin(elapsed * 2 + x) * 0.8;
-  for (let cx = x + 18; cx <= x + w - 18; cx += 20) {
-    // Sombra elíptica semitransparente (rgba(0,0,0,0.25)) calculada dinámicamente según Y
-    drawEntityDynamicShadow(ctx, cx + 2, row3Y + 4, 11, 5);
-
-    // Caña alta de maíz
-    ctx.fillStyle = '#1e4a1d';
-    ctx.fillRect(cx, row3Y - 18, 2, 20);
-    ctx.fillStyle = '#3f8e3d';
-    ctx.fillRect(cx - 5 + wind, row3Y - 12, 12, 8);
-    ctx.fillStyle = '#65c462';
-    ctx.fillRect(cx - 4 + wind, row3Y - 11, 10, 5);
-
-    // Espiga de maíz
-    ctx.fillStyle = '#fbbf24';
-    ctx.fillRect(cx + 1, row3Y - 9, 3, 5);
-    ctx.fillStyle = '#fef08a';
-    ctx.fillRect(cx + 1, row3Y - 9, 1, 3);
-  }
-
-  // 5. Fila 4: Coles brillantes y lechugas
-  const row4Y = rows[3] + 2;
-  for (let cx = x + 14; cx <= x + w - 14; cx += 24) {
-    // Sombra elíptica semitransparente (rgba(0,0,0,0.25)) calculada dinámicamente según Y
-    drawEntityDynamicShadow(ctx, cx + 2, row4Y + 3, 8, 4);
-
-    ctx.fillStyle = '#143818';
-    ctx.beginPath();
-    ctx.ellipse(cx, row4Y - 2, 7, 5, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#22662a';
-    ctx.beginPath();
-    ctx.ellipse(cx, row4Y - 2, 5, 4, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#4ade80';
-    ctx.fillRect(cx - 2, row4Y - 3, 4, 3);
-    ctx.fillStyle = '#bbf7d0';
-    ctx.fillRect(cx - 1, row4Y - 3, 2, 1);
-  }
-
-  // 6. Elementos accesorios (Barril de agua y cajones de cosecha)
-  const barrelX = x + 10;
-  const barrelY = y + h - 14;
-  drawEntityDynamicShadow(ctx, barrelX + 6, barrelY + 12, 10, 5);
-
-  // Barril
-  ctx.fillStyle = '#3f2817';
-  ctx.fillRect(barrelX, barrelY, 12, 13);
-  ctx.fillStyle = '#6b462b';
-  ctx.fillRect(barrelX + 1, barrelY + 1, 10, 11);
-  ctx.fillStyle = '#383b42';
-  ctx.fillRect(barrelX, barrelY + 3, 12, 2);
-  ctx.fillRect(barrelX, barrelY + 9, 12, 2);
-  ctx.fillStyle = '#38bdf8';
-  ctx.fillRect(barrelX + 2, barrelY + 1, 8, 2);
-
-  // Postes de cerco perimetral con sombras elípticas dinámicas
+  // Postes del cerco: mismo lenguaje de madera que el resto de la isla.
   for (const px of [x + 2, x + Math.round(w / 2), x + w - 4]) {
     for (const py of [y + 2, y + h - 2]) {
-      drawEntityDynamicShadow(ctx, px + 1, py + 2, 5, 3);
       ctx.fillStyle = '#2d1a0e';
       ctx.fillRect(px - 1, py - 10, 4, 11);
       ctx.fillStyle = '#6e4528';
@@ -4612,6 +4988,117 @@ function getBakedBushNoBg(img: HTMLImageElement): HTMLCanvasElement | null {
   return out;
 }
 
+/**
+ * Sombra difusa de los arbustos. El degradado sólo depende del radio, así que
+ * se crea una vez por tamaño y se reutiliza trasladando el lienzo. Antes se
+ * instanciaban más de doscientos `createRadialGradient` por cuadro.
+ */
+const natalShadowGradientCache = new Map<string, CanvasGradient>();
+function getNatalShadowGradient(
+  ctx: CanvasRenderingContext2D,
+  family: 'bush' | 'fallback',
+  outer: number
+): CanvasGradient {
+  const r = Math.round(outer * 10) / 10;
+  const key = `${family}:${r}`;
+  const cached = natalShadowGradientCache.get(key);
+  if (cached) return cached;
+  const inner = family === 'bush' ? r * 0.1282 : r * 0.074;
+  const g = ctx.createRadialGradient(0, 0, inner, 0, 0, r);
+  if (family === 'bush') {
+    g.addColorStop(0, 'rgba(4, 18, 8, 0.62)');
+    g.addColorStop(0.48, 'rgba(8, 28, 14, 0.28)');
+    g.addColorStop(1, 'rgba(12, 38, 20, 0)');
+  } else {
+    g.addColorStop(0, 'rgba(4, 18, 8, 0.58)');
+    g.addColorStop(0.5, 'rgba(8, 28, 14, 0.24)');
+    g.addColorStop(1, 'rgba(12, 38, 20, 0)');
+  }
+  natalShadowGradientCache.set(key, g);
+  return g;
+}
+
+/**
+ * Sprite precompuesto de cada arbusto: sombra difusa + follaje recortado.
+ * Cada grupo repite la misma combinación (foto, ancho), así que se hornea una
+ * sola vez por combinación a 3× y luego se dibuja con un único `drawImage`.
+ * Evita cientos de degradados radiales y elipses por cuadro sin alterar el
+ * aspecto: el horneado usa exactamente los mismos parámetros que el dibujo
+ * original.
+ */
+const NATAL_BUSH_SPRITE_SUPERSAMPLE = 3;
+
+interface NatalBushSprite {
+  canvas: HTMLCanvasElement;
+  /** Esquina superior izquierda relativa al anclaje del arbusto. */
+  ox: number;
+  oy: number;
+  w: number;
+  h: number;
+}
+
+const natalBushSpriteCache = new Map<string, NatalBushSprite | null>();
+
+function getNatalBushSprite(
+  imgIdx: number,
+  baked: HTMLCanvasElement,
+  bw: number
+): NatalBushSprite | null {
+  const key = `${imgIdx}|${bw}`;
+  if (natalBushSpriteCache.has(key)) return natalBushSpriteCache.get(key)!;
+
+  const bh = Math.round((baked.height / baked.width) * bw);
+  const rx = bw * 0.78;
+  const ry = 11;
+  const left = Math.min(-rx, -bw / 2);
+  const right = Math.max(rx, bw / 2);
+  const top = -bh + 2;
+  const bottom = 2 + ry;
+  const pad = 1;
+  const w = Math.ceil(right - left) + pad * 2;
+  const h = Math.ceil(bottom - top) + pad * 2;
+
+  const S = NATAL_BUSH_SPRITE_SUPERSAMPLE;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(w * S);
+  canvas.height = Math.ceil(h * S);
+  const cctx = canvas.getContext('2d');
+  if (!cctx) {
+    natalBushSpriteCache.set(key, null);
+    return null;
+  }
+
+  // Origen (anclaje del arbusto) dentro del sprite, en unidades de mundo.
+  const originX = -left + pad;
+  const originY = -top + pad;
+
+  // Misma sombra radial que dibujaba cada cuadro, horneada a resolución 3×.
+  const sx = originX * S;
+  const sy = (originY + 2) * S;
+  const g = cctx.createRadialGradient(sx, sy, rx * 0.1282 * S, sx, sy, rx * S);
+  g.addColorStop(0, 'rgba(4, 18, 8, 0.62)');
+  g.addColorStop(0.48, 'rgba(8, 28, 14, 0.28)');
+  g.addColorStop(1, 'rgba(12, 38, 20, 0)');
+  cctx.fillStyle = g;
+  cctx.beginPath();
+  cctx.ellipse(sx, sy, rx * S, ry * S, 0, 0, Math.PI * 2);
+  cctx.fill();
+
+  cctx.imageSmoothingEnabled = true;
+  cctx.imageSmoothingQuality = 'high';
+  cctx.drawImage(
+    baked,
+    (originX - bw / 2) * S,
+    (originY - bh + 2) * S,
+    bw * S,
+    bh * S
+  );
+
+  const sprite: NatalBushSprite = { canvas, ox: left - pad, oy: top - pad, w, h };
+  natalBushSpriteCache.set(key, sprite);
+  return sprite;
+}
+
 function drawBushCluster(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -4628,6 +5115,12 @@ function drawBushCluster(
   }
 
   const count = 2 + Math.floor(seed * 2); // 2 o 3 arbustos agrupados orgánicamente
+  const bw = Math.round(44 * scale);
+
+  // El estado de suavizado se fija una vez por grupo en lugar de por arbusto.
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   for (let i = 0; i < count; i++) {
     const offsetX = Math.round((hash2(x + i * 37, y - i * 19) - 0.5) * 24);
     const offsetY = Math.round((hash2(x + i * 23, y + i * 29) - 0.5) * 12);
@@ -4639,37 +5132,31 @@ function drawBushCluster(
     const baked = getBakedBushNoBg(img);
     if (!baked) continue;
 
-    const bw = Math.round(44 * scale);
-    const bh = Math.round((baked.height / baked.width) * bw);
+    const sprite = getNatalBushSprite(imgIdx, baked, bw);
+    if (!sprite) continue;
 
-    // EFECTO DIFUSO DE SOMBRA & INTEGRACIÓN CON EL CÉSPED
-    ctx.save();
-    const diffGrad = ctx.createRadialGradient(bx, by + 2, bw * 0.1, bx, by + 2, bw * 0.78);
-    diffGrad.addColorStop(0, 'rgba(4, 18, 8, 0.62)');
-    diffGrad.addColorStop(0.48, 'rgba(8, 28, 14, 0.28)');
-    diffGrad.addColorStop(1, 'rgba(12, 38, 20, 0)');
-    ctx.fillStyle = diffGrad;
-    ctx.beginPath();
-    ctx.ellipse(bx, by + 2, bw * 0.78, 11, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-
+    // Sombra de contacto dinámica (depende de la profundidad Y) y sprite
+    // precompuesto con la sombra difusa y el follaje ya integrados.
     drawEntityDynamicShadow(ctx, bx + 2, by + 2, bw * 0.48, 6);
-
-    ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(baked, Math.round(bx - bw * 0.5), Math.round(by - bh + 2), bw, bh);
-    ctx.restore();
+    ctx.drawImage(
+      sprite.canvas,
+      Math.round(bx + sprite.ox),
+      Math.round(by + sprite.oy),
+      sprite.w,
+      sprite.h
+    );
 
     // Briznas de hierba que abrazan la base del arbusto para fundirlo en el suelo
     ctx.fillStyle = '#22662c';
+    ctx.beginPath();
     for (let k = -2; k <= 2; k++) {
       const gx = bx + k * 8;
       const gh = 3 + Math.floor(hash2(gx, by) * 3);
-      ctx.fillRect(gx, by - gh + 2, 2, gh);
+      ctx.rect(gx, by - gh + 2, 2, gh);
     }
+    ctx.fill();
   }
+  ctx.restore();
 }
 
 function drawBush(
@@ -4687,13 +5174,10 @@ function drawBush(
 
   // EFECTO DIFUSO DE SOMBRA Y AURA VEGETAL
   ctx.save();
-  const diffGrad = ctx.createRadialGradient(x, y + 2, half * 0.1, x, y + 2, half * 1.35);
-  diffGrad.addColorStop(0, 'rgba(4, 18, 8, 0.58)');
-  diffGrad.addColorStop(0.5, 'rgba(8, 28, 14, 0.24)');
-  diffGrad.addColorStop(1, 'rgba(12, 38, 20, 0)');
-  ctx.fillStyle = diffGrad;
+  ctx.translate(x, y + 2);
+  ctx.fillStyle = getNatalShadowGradient(ctx, 'fallback', half * 1.35);
   ctx.beginPath();
-  ctx.ellipse(x, y + 2, half * 1.35, 10, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, half * 1.35, 10, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 
@@ -4860,22 +5344,28 @@ function drawAmbientLife(
   vw: number,
   vh: number,
   elapsed: number,
-  reducedMotion: boolean
+  reducedMotion: boolean,
+  quality: 0 | 1 | 2
 ): void {
+  ctx.fillStyle = 'rgb(255, 238, 184)';
   for (let i = 0; i < NATAL_MOTES.length; i++) {
+    // Con calidad reducida se conserva una de cada dos motas.
+    if (quality > 0 && (i & 1) === 0) continue;
     const m = NATAL_MOTES[i];
     if (!isWorldBoxVisible(m.x - 12, m.y - 12, 24, 24, camX, camY, vw, vh)) continue;
     const t = elapsed * m.speed + m.phase;
     const x = Math.round(m.x + Math.sin(t) * 13 + Math.cos(t * 0.6) * 5);
     const y = Math.round(m.y + Math.cos(t * 0.8) * 7 - Math.sin(t * 0.4) * 4);
     const a = 0.18 + (Math.sin(t * 1.7) * 0.5 + 0.5) * 0.4;
-    ctx.fillStyle = `rgba(255, 238, 184, ${a.toFixed(3)})`;
+    ctx.globalAlpha = a;
     ctx.fillRect(x, y, m.size, m.size);
   }
+  ctx.globalAlpha = 1;
 
-  if (reducedMotion) return;
+  if (reducedMotion || quality > 1) return;
   for (let i = 0; i < NATAL_BUTTERFLIES.length; i++) {
     const b = NATAL_BUTTERFLIES[i];
+    if (quality > 0 && (i & 1) === 0) continue;
     const t = elapsed * 0.7 + b.phase;
     const x = Math.round(b.x + Math.sin(t) * 26 + Math.sin(t * 0.37) * 9);
     const y = Math.round(b.y - 10 + Math.cos(t * 0.8) * 12);
@@ -5083,6 +5573,57 @@ function drawClutter(
   ctx.restore();
 }
 
+interface NatalPalmStatic {
+  useTwinVariant: boolean;
+  flipped: boolean;
+  drawW: number;
+  drawH: number;
+  seawardLean: number;
+  onSand: boolean;
+  onPath: boolean;
+  nearBeach: boolean;
+  inArboleda: boolean;
+}
+
+/**
+ * Clasificación de terreno de cada palmera: es decorado fijo, así que las
+ * consultas de polígonos (tres anillos por llamada) se resuelven una sola vez
+ * y se reutilizan en todos los cuadros.
+ */
+const natalPalmStaticCache = new Map<string, NatalPalmStatic>();
+
+function getNatalPalmStatic(baseX: number, baseY: number, seed: number): NatalPalmStatic {
+  const key = `${baseX},${baseY}`;
+  const cached = natalPalmStaticCache.get(key);
+  if (cached) return cached;
+  const land = isIslaNatalPointOnLand(baseX, baseY);
+  const onMeadow = isPointOnNatalMeadow(baseX, baseY);
+  const onSand = !onMeadow && land?.surface !== 'path';
+  const nearBeach = onSand || !isPointOnNatalMeadow(baseX, baseY + 20);
+  const onPath = land?.surface === 'path';
+  const inArboleda = land?.zone === 'arboleda-arcade' || baseX > 1080;
+  const useTwinVariant = seed >= 0.48;
+  const scale = 0.84 + seed * 0.28;
+  const value: NatalPalmStatic = {
+    useTwinVariant,
+    flipped: hash2(baseX + 31, baseY - 19) > 0.5,
+    drawW: Math.round((useTwinVariant ? 80 : 90) * scale),
+    drawH: Math.round((useTwinVariant ? 104 : 92) * scale),
+    // Inclinación orgánica hacia el océano (sur / sureste)
+    seawardLean: 0.038 + (hash2(baseX - 13, baseY + 29) - 0.42) * 0.055,
+    onSand,
+    onPath,
+    nearBeach,
+    inArboleda,
+  };
+  natalPalmStaticCache.set(key, value);
+  return value;
+}
+
+const NATAL_PALM_GRASS_TWIN = [-15, -9, -3, 3, 9, 15];
+const NATAL_PALM_GRASS_SINGLE = [-8, -4, 0, 4, 8];
+const NATAL_TREE_GRASS_OFFSETS = [-17, -11, -5, 2, 8, 14];
+
 function drawPalm(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -5094,25 +5635,14 @@ function drawPalm(
   const baseX = Math.round(x);
   const baseY = Math.round(y);
   const [palmSingleSet, palmTwinSet] = ensureNatalPalmSprites();
-  const useTwinVariant = seed >= 0.48;
+  const stat = getNatalPalmStatic(baseX, baseY, seed);
+  const { useTwinVariant, flipped, drawW, drawH, onSand, onPath, nearBeach, inArboleda } = stat;
   const set = useTwinVariant ? palmTwinSet : palmSingleSet;
-  const flipped = hash2(baseX + 31, baseY - 19) > 0.5;
-
-  const land = isIslaNatalPointOnLand(baseX, baseY);
-  const onMeadow = isPointOnNatalMeadow(baseX, baseY);
-  const onSand = !onMeadow && land?.surface !== 'path';
-  const nearBeach = onSand || !isPointOnNatalMeadow(baseX, baseY + 20);
-  const onPath = land?.surface === 'path';
-  const inArboleda = land?.zone === 'arboleda-arcade' || baseX > 1080;
 
   const pair = set ? (inArboleda ? set.woodland : set.sunlit) : null;
   const sprite = pair ? pair[flipped ? 1 : 0] : null;
 
-  const scale = 0.84 + seed * 0.28;
-  const drawW = Math.round((useTwinVariant ? 80 : 90) * scale);
-  const drawH = Math.round((useTwinVariant ? 104 : 92) * scale);
-  // Inclinación orgánica hacia el océano (sur / sureste)
-  const seawardLean = 0.038 + (hash2(baseX - 13, baseY + 29) - 0.42) * 0.055;
+  const seawardLean = stat.seawardLean;
   const breeze = reducedMotion
     ? 0
     : Math.sin(elapsed * 1.06 + seed * 9 + baseX * 0.018) * 0.02 +
@@ -5231,7 +5761,7 @@ function drawPalm(
   }
   if (!onSand) {
     const sway = reducedMotion ? 0 : Math.round(Math.sin(elapsed * 1.45 + seed * 6) * 0.7);
-    const offsets = useTwinVariant ? [-15, -9, -3, 3, 9, 15] : [-8, -4, 0, 4, 8];
+    const offsets = useTwinVariant ? NATAL_PALM_GRASS_TWIN : NATAL_PALM_GRASS_SINGLE;
     for (let i = 0; i < offsets.length; i++) {
       const gx = offsets[i] + Math.round((hash2(baseX + i * 7, baseY - i * 5) - 0.5) * 2);
       const gh = 3 + ((i + Math.floor(seed * 10)) % 3);
@@ -5843,8 +6373,7 @@ function drawClayTileRoof(
 }
 
 /** Festón de paja que cuelga bajo el alero, con hebras de distinta longitud. */
-function drawThatchFringe(
-  ctx: CanvasRenderingContext2D,
+function drawThatchFringe(  ctx: CanvasRenderingContext2D,
   x: number,
   eaveY: number,
   w: number,
@@ -6674,6 +7203,107 @@ function drawCrateProp(ctx: CanvasRenderingContext2D, x: number, baseY: number, 
   ctx.restore();
 }
 
+/* ------------------------------------------------------------------ */
+/* SPRITES DE PORCIONES ESTÁTICAS (techos, adornos fijos)             */
+/* ------------------------------------------------------------------ */
+
+interface NatalBakedStatic {
+  canvas: HTMLCanvasElement;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const natalBakedStaticCache = new Map<string, NatalBakedStatic | null>();
+const NATAL_BAKED_STATIC_SCALE = 3;
+
+/**
+ * Hornea una sola vez una porción estática dibujada con coordenadas de mundo
+ * y luego la blitea en cada cuadro. Reduce cientos de operaciones de dibujo de
+ * techos y adornos fijos a un `drawImage`, sin cambiar el resultado: el horneado
+ * ejecuta exactamente la misma función de pintado.
+ */
+function drawBakedStatic(
+  ctx: CanvasRenderingContext2D,
+  key: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  pad: number,
+  paint: (target: CanvasRenderingContext2D) => void
+): void {
+  let entry = natalBakedStaticCache.get(key);
+  if (entry === undefined) {
+    const sx = x - pad;
+    const sy = y - pad;
+    const sw = w + pad * 2;
+    const sh = h + pad * 2;
+    const S = NATAL_BAKED_STATIC_SCALE;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(sw * S);
+    canvas.height = Math.ceil(sh * S);
+    const cctx = canvas.getContext('2d');
+    if (!cctx) {
+      natalBakedStaticCache.set(key, null);
+      return;
+    }
+    cctx.scale(S, S);
+    cctx.translate(-sx, -sy);
+    paint(cctx);
+    entry = { canvas, x: sx, y: sy, w: sw, h: sh };
+    natalBakedStaticCache.set(key, entry);
+  }
+  if (!entry) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(entry.canvas, entry.x, entry.y, entry.w, entry.h);
+  ctx.restore();
+}
+
+/**
+ * Igual que `drawBakedStatic`, pero hornea a 1× y sin suavizado: reproduce
+ * exactamente los mismos píxeles que el dibujo en vivo. Se usa para piezas
+ * estáticas de pixel-art (tablones, tejamanil, enredaderas) donde cualquier
+ * suavizado alteraría la estética.
+ */
+const natalBakedStatic1xCache = new Map<string, NatalBakedStatic | null>();
+
+function drawBakedStatic1x(
+  ctx: CanvasRenderingContext2D,
+  key: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  paint: (target: CanvasRenderingContext2D) => void
+): void {
+  let entry = natalBakedStatic1xCache.get(key);
+  if (entry === undefined) {
+    const sx = Math.floor(x);
+    const sy = Math.floor(y);
+    const sw = Math.max(1, Math.ceil(w));
+    const sh = Math.max(1, Math.ceil(h));
+    const canvas = document.createElement('canvas');
+    canvas.width = sw;
+    canvas.height = sh;
+    const cctx = canvas.getContext('2d');
+    if (!cctx) {
+      natalBakedStatic1xCache.set(key, null);
+      return;
+    }
+    cctx.imageSmoothingEnabled = false;
+    cctx.translate(-sx, -sy);
+    paint(cctx);
+    entry = { canvas, x: sx, y: sy, w: sw, h: sh };
+    natalBakedStatic1xCache.set(key, entry);
+  }
+  if (!entry) return;
+  ctx.drawImage(entry.canvas, entry.x, entry.y, entry.w, entry.h);
+}
+
 function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: boolean): void {
   const { x, y } = HUT_POS;
   const s = ISLA_NATAL_SOLIDS.find((v) => v.id === 'cabana');
@@ -6884,7 +7514,10 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
     '#bcc4b0'
   );
   // Rosal trepador entre la leñera y la puerta, sobre enrejado de madera.
-  drawClimbingRose(ctx, eastBodyX + 1, y + 58, baseY - 2, 5, '#f472b6');
+  // Es estático y se dibuja con cientos de píxeles: se hornea una sola vez.
+  drawBakedStatic1x(ctx, 'natal-rose-hut', 632, 1006, 17, 42, (c) =>
+    drawClimbingRose(c, eastBodyX + 1, y + 58, baseY - 2, 5, '#f472b6')
+  );
 
   // 5. Planta media de madera entramada y vigas vistas (usando textura adjunta de madera)
   // Caja saliente de troncos ensamblados en el ala oeste
@@ -6897,7 +7530,7 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
     ctx.beginPath();
     ctx.rect(westWingX + 2, westTimberTop + 2, westWingW - 4, westTimberH - 4);
     ctx.clip();
-    const pat = ctx.createPattern(woodTiles.aged, 'repeat');
+    const pat = getCachedPattern(ctx, woodTiles.aged);
     if (pat) {
       ctx.fillStyle = pat;
       ctx.fillRect(westWingX + 2, westTimberTop + 2, westWingW - 4, westTimberH - 4);
@@ -7077,7 +7710,16 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
   const roofSeed = hash2(x + 3, y - 5);
 
   // 7a. Faldón principal de paja sobre el cuerpo este.
-  drawThatchRoof(ctx, eastBodyX - 14, y - 26, eastBodyW + 34, 51, roofSeed);
+  drawBakedStatic(
+    ctx,
+    'roof-hut-main',
+    eastBodyX - 14,
+    y - 26,
+    eastBodyW + 34,
+    51,
+    16,
+    (c) => drawThatchRoof(c, eastBodyX - 14, y - 26, eastBodyW + 34, 51, roofSeed)
+  );
   drawRoofEaveDepth(ctx, eastBodyX - 14, y + 24, eastBodyW + 34, '#5c3b22', '#9c6a40', 12);
   // El festón de paja cuelga por delante de la solera y las cabezas de cabio.
   drawThatchFringe(ctx, eastBodyX - 18, y + 25, eastBodyW + 42, roofSeed);
@@ -7120,13 +7762,31 @@ function drawHut(ctx: CanvasRenderingContext2D, elapsed: number, reducedMotion: 
     boxColor: '#f9a8d4',
   });
   // Capota de paja a dos aguas con alero festoneado.
-  drawThatchRoof(ctx, dormerX - 18, y - 10, 36, 13, roofSeed + 4);
+  drawBakedStatic(
+    ctx,
+    'roof-hut-dormer',
+    dormerX - 18,
+    y - 10,
+    36,
+    13,
+    16,
+    (c) => drawThatchRoof(c, dormerX - 18, y - 10, 36, 13, roofSeed + 4)
+  );
   ctx.fillStyle = 'rgba(18, 10, 6, 0.12)';
   ctx.fillRect(dormerX - 20, y + 2, 40, 2);
 
   // 7c. Ala oeste: tejadillo de teja árabe adosado, más bajo que la paja,
   // con lima de encuentro sombreada y ventilación de pajar.
-  drawClayTileRoof(ctx, westWingX - 10, y - 6, westWingW + 24, 40, roofSeed + 9);
+  drawBakedStatic(
+    ctx,
+    'roof-hut-west',
+    westWingX - 10,
+    y - 6,
+    westWingW + 24,
+    40,
+    16,
+    (c) => drawClayTileRoof(c, westWingX - 10, y - 6, westWingW + 24, 40, roofSeed + 9)
+  );
   drawRoofEaveDepth(ctx, westWingX - 10, y + 32, westWingW + 24, '#6e4728', '#a9794c', 11);
   ctx.fillStyle = 'rgba(26, 14, 8, 0.3)';
   ctx.fillRect(westWingX - 8, y + 36, westWingW + 20, 2);
@@ -7379,7 +8039,7 @@ function drawShed(
     ctx.beginPath();
     ctx.rect(porchX + 2, baseY - 13, porchW - 4, 11);
     ctx.clip();
-    const pat = ctx.createPattern(woodTiles.weathered, 'repeat');
+    const pat = getCachedPattern(ctx, woodTiles.weathered);
     if (pat) {
       ctx.fillStyle = pat;
       ctx.fillRect(porchX + 2, baseY - 13, porchW - 4, 11);
@@ -7401,7 +8061,7 @@ function drawShed(
     ctx.beginPath();
     ctx.rect(porchX + 4, y + 28, porchW - 10, h - 42);
     ctx.clip();
-    const pat = ctx.createPattern(woodTiles.aged, 'repeat');
+    const pat = getCachedPattern(ctx, woodTiles.aged);
     if (pat) {
       ctx.fillStyle = pat;
       ctx.fillRect(porchX + 4, y + 28, porchW - 10, h - 42);
@@ -7456,7 +8116,9 @@ function drawShed(
     ctx.fillStyle = 'rgba(46, 58, 42, 0.16)';
     ctx.fillRect(sx, lodgeStoneTop + 4, 1, baseY - lodgeStoneTop - 8);
   }
-  drawClimbingRose(ctx, x + 2, y + 50, baseY - 14, 9, '#fb7185');
+  drawBakedStatic1x(ctx, 'natal-rose-shed', 1621, 763, 17, 65, (c) =>
+    drawClimbingRose(c, x + 2, y + 50, baseY - 14, 9, '#fb7185')
+  );
   // Muro de troncos del cuerpo oeste
   const lodgeWallTop = y + 36;
   const lodgeWallH = lodgeStoneTop - lodgeWallTop;
@@ -7467,7 +8129,7 @@ function drawShed(
     ctx.beginPath();
     ctx.rect(x + 2, lodgeWallTop + 2, lodgeW - 4, lodgeWallH - 4);
     ctx.clip();
-    const pat = ctx.createPattern(woodTiles.warm, 'repeat');
+    const pat = getCachedPattern(ctx, woodTiles.warm);
     if (pat) {
       ctx.fillStyle = pat;
       ctx.fillRect(x + 2, lodgeWallTop + 2, lodgeW - 4, lodgeWallH - 4);
@@ -7584,7 +8246,17 @@ function drawShed(
   const shedRoofSeed = hash2(x - 4, y + 9);
 
   // 5a. Faldón del porche-taller, canalón y bajante.
-  drawShingleRoof(ctx, porchX - 8, y - 6, porchW + 20, 27, shedRoofSeed);
+  // Los tejamaniles son estáticos: se hornean a 1× una sola vez y se blitean
+  // como una imagen (antes eran más de mil `fillRect` por cuadro).
+  drawBakedStatic1x(
+    ctx,
+    'natal-shed-roof-porch',
+    porchX - 12,
+    y - 22,
+    porchW + 30,
+    50,
+    (c) => drawShingleRoof(c, porchX - 8, y - 6, porchW + 20, 27, shedRoofSeed)
+  );
   drawRoofEaveDepth(ctx, porchX - 8, y + 21, porchW + 20, '#3f2817', '#8a5d34', 13);
   ctx.fillStyle = '#5b4a32';
   ctx.fillRect(porchX - 7, y + 24, porchW + 18, 2);
@@ -7608,9 +8280,20 @@ function drawShed(
     ctx.fillRect(sx, y + 26, 3, 1);
   }
 
-  // 5b. Faldones del cuerpo cerrado oeste.
-  drawShingleRoof(ctx, x - 16, y - 28, 48, 60, shedRoofSeed + 7);
-  drawShingleRoof(ctx, x + 30, y - 28, 34, 60, shedRoofSeed + 11);
+  // 5b. Faldones del cuerpo cerrado oeste. Ambos son estáticos y contiguos:
+  // se hornean juntos en una sola imagen para reducir el coste por cuadro.
+  drawBakedStatic1x(
+    ctx,
+    'natal-shed-roof-body',
+    x - 22,
+    y - 44,
+    92,
+    82,
+    (c) => {
+      drawShingleRoof(c, x - 16, y - 28, 48, 60, shedRoofSeed + 7);
+      drawShingleRoof(c, x + 30, y - 28, 34, 60, shedRoofSeed + 11);
+    }
+  );
   drawRoofEaveDepth(ctx, x - 16, y + 31, 80, '#3f2817', '#8a5d34', 12);
 
   // Escamas descoloridas, hongos de humedad y hojas secas sobre el tejamanil.
@@ -8335,7 +9018,7 @@ function drawBeachBoardwalk(ctx: CanvasRenderingContext2D): void {
     ctx.beginPath();
     ctx.rect(x + 1, y + 1, w - 2, h - 2);
     ctx.clip();
-    const pat = ctx.createPattern(woodTiles.weathered, 'repeat');
+    const pat = getCachedPattern(ctx, woodTiles.weathered);
     if (pat) {
       ctx.fillStyle = pat;
       ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
@@ -8484,7 +9167,7 @@ function drawNorthPortDock(
       ctx.beginPath();
       ctx.rect(rx, ry, rw, rh);
       ctx.clip();
-      const pat = ctx.createPattern(tile, 'repeat');
+      const pat = getCachedPattern(ctx, tile);
       if (pat) {
         ctx.translate(rx, ry);
         ctx.fillStyle = pat;
@@ -8671,7 +9354,7 @@ function drawNorthPortDockProps(
       ctx.beginPath();
       ctx.rect(cx + 1, cy + 7, 14, 13);
       ctx.clip();
-      const pat = ctx.createPattern(woodTiles.warm, 'repeat');
+      const pat = getCachedPattern(ctx, woodTiles.warm);
       if (pat) {
         ctx.fillStyle = pat;
         ctx.fillRect(cx + 1, cy + 7, 14, 13);
@@ -9000,6 +9683,7 @@ function drawPlayer(
       reducedMotion: params.reducedMotion,
       interactAnim: p.interactAnim,
       appearance: params.appearance,
+      walkFrameIndex: p.walkFrameIndex,
     }
   );
 
@@ -10924,6 +11608,224 @@ function ensureNatalTreeSprites(): [
   return [natalTreeBaked1, natalTreeBaked2];
 }
 
+/**
+ * Copas teñidas: el matiz y el brillo de cada árbol se hornean una sola vez.
+ * `ctx.filter` es una de las operaciones más caras del canvas y se aplicaba a
+ * cada copa visible en cada cuadro; ahora sólo se paga al aparecer el árbol.
+ */
+const natalTintedTreeCache = new WeakMap<
+  HTMLCanvasElement,
+  Map<string, HTMLCanvasElement>
+>();
+
+/**
+ * Detalle de suelo (matas, flores, guijarros y conchas) prerenderizado en una
+ * sola capa de mundo. Antes se recorrían y dibujaban cientos de elementos por
+ * cuadro (miles de `fillRect`); ahora se compone con un único `drawImage` de
+ * la porción visible. Las matas comparten una brisa global de 1 px: la capa se
+ * desplaza con `translate(sway, 0)`, así que la animación se conserva sin
+ * regenerar ni un píxel.
+ *
+ * Se eligió una sola capa en lugar de sectores porque, medido en el juego,
+ * varias composiciones alfa por cuadro costaban más que una sola; la capa se
+ * construye una única vez y no cambia durante la partida.
+ */
+let natalGroundDetailLayer: HTMLCanvasElement | null = null;
+
+function paintNatalGroundDetails(
+  ctx: CanvasRenderingContext2D,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number
+): void {
+  for (const t of NATAL_MEADOW_TUFTS) {
+    if (t.x + 8 < minX || t.y + 12 < minY || t.x - 8 > maxX || t.y - 12 > maxY) continue;
+    drawTuft(ctx, t.x, t.y, t.seed, 0);
+  }
+  for (const f of NATAL_MEADOW_FLOWERS) {
+    if (f.x + 6 < minX || f.y + 10 < minY || f.x - 6 > maxX || f.y - 10 > maxY) continue;
+    drawFlower(ctx, f.x, f.y, f.seed);
+  }
+  for (const p of ISLA_NATAL_PEBBLES) {
+    if (p.x + 12 < minX || p.y + 12 < minY || p.x - 12 > maxX || p.y - 12 > maxY) continue;
+    drawPebble(ctx, p.x, p.y, p.seed);
+  }
+  for (const sh of ISLA_NATAL_SHELLS) {
+    if (sh.x + 6 < minX || sh.y + 6 < minY || sh.x - 6 > maxX || sh.y - 6 > maxY) continue;
+    drawShell(ctx, sh.x, sh.y, sh.seed);
+  }
+}
+
+function ensureNatalGroundDetailLayer(): HTMLCanvasElement | null {
+  if (typeof document === 'undefined') return null;
+  if (natalGroundDetailLayer) return natalGroundDetailLayer;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(ISLA_NATAL_WORLD_W);
+  canvas.height = Math.ceil(ISLA_NATAL_WORLD_H);
+  const cctx = canvas.getContext('2d');
+  if (!cctx) return null;
+  cctx.imageSmoothingEnabled = false;
+  paintNatalGroundDetails(cctx, 0, 0, canvas.width, canvas.height);
+  natalGroundDetailLayer = canvas;
+  return canvas;
+}
+
+function getTintedTreeSprite(
+  sprite: HTMLCanvasElement,
+  width: number,
+  height: number,
+  tintDeg: number,
+  brightness: number
+): HTMLCanvasElement | null {
+  if (typeof document === 'undefined') return null;
+  let bucket = natalTintedTreeCache.get(sprite);
+  if (!bucket) {
+    bucket = new Map();
+    natalTintedTreeCache.set(sprite, bucket);
+  }
+  const key = `${width}x${height}|${tintDeg}|${brightness}`;
+  const cached = bucket.get(key);
+  if (cached) return cached;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const cctx = canvas.getContext('2d');
+  if (!cctx) return null;
+  cctx.imageSmoothingEnabled = false;
+  cctx.filter = `hue-rotate(${tintDeg}deg) brightness(${brightness}%)`;
+  cctx.drawImage(sprite, 0, 0, width, height);
+  cctx.filter = 'none';
+  bucket.set(key, canvas);
+  return canvas;
+}
+
+/* ------------------------------------------------------------------ */
+/* BASE ESTÁTICA DEL ARBOLADO POR SECTORES                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Sombras, raíces y mantillo no dependen de la brisa: se hornean una sola vez
+ * por sector y se reutilizan. Antes se repetían decenas de trazos por árbol en
+ * cada fotograma, y en la arboleda densa hay más de ochenta árboles en cámara.
+ * Las copas y la hierba al pie siguen dibujándose vivas para conservar el
+ * movimiento de la vegetación.
+ */
+function drawNatalTreeUnderstory(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  shadowShift: number
+): void {
+  // 1. Sombra moteada del dosel proyectada al este-sureste
+  ctx.fillStyle = 'rgba(14, 38, 22, 0.18)';
+  ctx.beginPath();
+  ctx.ellipse(15 + shadowShift, 4, size * 0.42, size * 0.14, 0.08, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(14, 38, 22, 0.15)';
+  ctx.beginPath();
+  ctx.ellipse(24 + shadowShift, 1, size * 0.25, size * 0.1, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 2. Oclusión ambiental profunda y sombra de contacto bajo el tronco
+  ctx.fillStyle = 'rgba(6, 18, 10, 0.65)';
+  ctx.beginPath();
+  ctx.ellipse(0, 3, size * 0.32, size * 0.11, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(2, 8, 4, 0.74)';
+  ctx.beginPath();
+  ctx.ellipse(0, 3, size * 0.18, size * 0.06, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Lecho de mantillo y tierra fértil donde brotan las raíces
+  ctx.fillStyle = 'rgba(54, 34, 16, 0.58)';
+  ctx.fillRect(-13, 1, 26, 4);
+
+  // Raíces leñosas visibles (root flares) extendiéndose a los lados
+  ctx.fillStyle = '#2b1708';
+  ctx.beginPath();
+  ctx.moveTo(-6, -4);
+  ctx.lineTo(-14, 3);
+  ctx.lineTo(-11, 4);
+  ctx.lineTo(-2, 0);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(6, -4);
+  ctx.lineTo(14, 3);
+  ctx.lineTo(11, 4);
+  ctx.lineTo(2, 0);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = '#366b31';
+  ctx.fillRect(-16, 0, 8, 2);
+  ctx.fillRect(9, 1, 8, 2);
+}
+
+type NatalTreeSpec = (typeof ISLA_NATAL_TREES)[number];
+
+function drawNatalTreeUnderstoryAt(
+  ctx: CanvasRenderingContext2D,
+  tree: NatalTreeSpec,
+  treeIndex: number
+): void {
+  const x = Math.round(tree.x);
+  const y = Math.round(tree.y);
+  const seed = hash2(x + treeIndex * 17, y - treeIndex * 13);
+  const useTallVariant =
+    tree.variant === 'pine' ? true : tree.variant === 'meadow' ? false : treeIndex % 2 === 1;
+  const size = Math.round(
+    (useTallVariant ? 86 : 90) * (tree.scale ?? 1) * (0.85 + seed * 0.3)
+  );
+  // La brisa sólo inclina la copa; la sombra horneada usa la inclinación
+  // orgánica del árbol, que es estable durante toda la partida.
+  const organicTilt = (hash2(x + 47, y - 31) - 0.48) * 0.07;
+  const shadowShift = Math.round(-organicTilt * 42);
+  ctx.save();
+  ctx.translate(x, y);
+  drawNatalTreeUnderstory(ctx, size, shadowShift);
+  ctx.restore();
+}
+
+/**
+ * Caché de sectores: sólo se hornean los visibles y el anillo próximo. Los
+ * sectores lejanos se descartan por LRU para acotar la memoria.
+ */
+const natalTreeUnderstoryCache = new StaticChunkCache({
+  chunkSize: 448,
+  margin: 32,
+  // 6x4 sectores cubren toda la isla: la caché puede conservarlos todos sin
+  // expulsar los visibles ni reiniciar la precarga en cada cruce de borde.
+  maxChunks: 24,
+  preloadChunks: 1,
+  bakeBudgetMs: 2,
+});
+
+const paintNatalTreeUnderstoryChunk = (
+  ctx: CanvasRenderingContext2D,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number
+): boolean => {
+  let painted = false;
+  for (let ti = 0; ti < ISLA_NATAL_TREES.length; ti++) {
+    const tree = ISLA_NATAL_TREES[ti];
+    const x = Math.round(tree.x);
+    const y = Math.round(tree.y);
+    // Alcance generoso para sombras y raíces; el sector vecino completa el
+    // borde, así que no quedan cortes visibles al cruzar de sector.
+    const reach = 96 * (tree.scale ?? 1);
+    if (x + reach < minX || x - reach > maxX || y + 28 < minY || y - 28 > maxY) continue;
+    drawNatalTreeUnderstoryAt(ctx, tree, ti);
+    painted = true;
+  }
+  return painted;
+};
+
 /* ------------------------------------------------------------------ */
 /* CUADRO COMPLETO                                                    */
 /* ------------------------------------------------------------------ */
@@ -10950,47 +11852,88 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
   } = params;
   if (!ctx) return;
 
+  // Calidad adaptativa: 0 = efectos completos, 2 = mínimo. Nunca altera la
+  // resolución, el mapa, los objetos principales ni la identidad visual.
+  const quality = params.quality ?? 0;
+
   ctx.imageSmoothingEnabled = false;
 
   const animFrame4 = reducedMotion ? 0 : Math.floor(elapsed * 3.2) % 4;
   const camX = Math.round(camera.x);
   const camY = Math.round(camera.y);
 
-  // Fondo de mar profundo (cubre todo el viewport antes de trasladar)
-  ctx.fillStyle = '#0a2b46';
-  ctx.fillRect(0, 0, vw, vh);
-
+  // El fondo de mar profundo lo pinta `drawOcean` con su gradiente cacheado;
+  // no hace falta un relleno plano adicional de todo el viewport.
   ctx.save();
   ctx.translate(-camX, -camY);
 
-  drawOcean(ctx, camX, camY, vw, vh, elapsed, animFrame4, charge, reducedMotion);
-  drawLandmass(ctx, camX, camY, vw, vh, elapsed);
+  drawOcean(ctx, camX, camY, vw, vh, elapsed, animFrame4, charge, reducedMotion, quality);
+  drawLandmass(ctx, camX, camY, vw, vh, elapsed, quality);
   drawCoastalSeaRocks(ctx, camX, camY, vw, vh, elapsed, reducedMotion);
 
   // Muelle del Puerto Norte: se dibuja como parte del suelo para que el
   // jugador pueda caminar sobre los tablones sin quedar oculto por la pasarela.
-  drawNorthPortDock(ctx, elapsed, departureReady, reducedMotion);
-  drawBeachBoardwalk(ctx);
+  // Solo se pinta si el puerto entra en cámara.
+  if (isWorldBoxVisible(1110, 400, 165, 295, camX, camY, vw, vh)) {
+    drawNorthPortDock(ctx, elapsed, departureReady, reducedMotion);
+  }
+  if (isWorldBoxVisible(730, 905, 86, 44, camX, camY, vw, vh)) {
+    // La pasarela usa la textura de madera que carga por etapas: se dibuja
+    // viva para que adopte el acabado definitivo en cuanto está disponible.
+    drawBeachBoardwalk(ctx);
+  }
 
-  // Detalle de suelo (matas, flores, guijarros, conchas)
+  // Detalle de suelo prerenderizado (matas, flores, guijarros, conchas).
+  // La brisa de 1 px se logra desplazando la capa completa, sin rehornear.
   const sway = reducedMotion ? 0 : Math.round(Math.sin(elapsed * 1.4) * 0.6);
-  for (const t of ISLA_NATAL_TUFTS) {
-    if (!isWorldBoxVisible(t.x - 6, t.y - 10, 12, 12, camX, camY, vw, vh)) continue;
-    if (!isPointOnNatalMeadow(t.x, t.y)) continue;
-    drawTuft(ctx, t.x, t.y, t.seed, sway);
+  const detailLayer = ensureNatalGroundDetailLayer();
+  if (detailLayer) {
+    if (sway !== 0) {
+      ctx.save();
+      ctx.translate(sway, 0);
+    }
+    const sx = Math.max(0, Math.floor(camX) - 2);
+    const sy = Math.max(0, Math.floor(camY) - 2);
+    const sw = Math.min(detailLayer.width - sx, Math.ceil(vw) + 4);
+    const sh = Math.min(detailLayer.height - sy, Math.ceil(vh) + 4);
+    if (sw > 0 && sh > 0) {
+      ctx.drawImage(detailLayer, sx, sy, sw, sh, sx, sy, sw, sh);
+    }
+    if (sway !== 0) ctx.restore();
   }
-  for (const f of ISLA_NATAL_FLOWERS) {
-    if (!isWorldBoxVisible(f.x - 4, f.y - 8, 8, 10, camX, camY, vw, vh)) continue;
-    if (!isPointOnNatalMeadow(f.x, f.y)) continue;
-    drawFlower(ctx, f.x, f.y, f.seed);
+
+  // Bases del arbolado: sombras, raíces y mantillo en sectores reutilizables.
+  // Se dibujan antes de las copas para que la hierba y los objetos las oculten.
+  const canBakeUnderstory = typeof document !== 'undefined';
+  if (canBakeUnderstory) {
+    natalTreeUnderstoryCache.draw(
+      ctx,
+      camX,
+      camY,
+      vw,
+      vh,
+      'natal-tree-understory-v1',
+      paintNatalTreeUnderstoryChunk
+    );
   }
-  for (const p of ISLA_NATAL_PEBBLES) {
-    if (!isWorldBoxVisible(p.x - 10, p.y - 10, 20, 16, camX, camY, vw, vh)) continue;
-    drawPebble(ctx, p.x, p.y, p.seed);
-  }
-  for (const s of ISLA_NATAL_SHELLS) {
-    if (!isWorldBoxVisible(s.x - 4, s.y - 4, 8, 8, camX, camY, vw, vh)) continue;
-    drawShell(ctx, s.x, s.y, s.seed);
+
+  // La huerta se pinta como suelo: el cerco sur vuelve en primer plano para
+  // que Pixel pueda entrar, caminar entre los canteros y salir sin ocultarse.
+  const gardenStage = params.gardenStage ?? 'growing';
+  const huertaBounds = HUERTA_SPRITE_RECT;
+  if (
+    isWorldBoxVisible(
+      huertaBounds.x - 24,
+      huertaBounds.y - 48,
+      huertaBounds.w + 48,
+      huertaBounds.h + 80,
+      camX,
+      camY,
+      vw,
+      vh
+    )
+  ) {
+    drawHuertaGardenBackground(ctx, gardenStage, elapsed, reducedMotion);
   }
 
   // Elementos ordenados por profundidad (oclusión correcta con el jugador)
@@ -11005,7 +11948,8 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     treeIndex: number,
     elapsed: number,
     reducedMotion: boolean,
-    sizeMultiplier = 1
+    sizeMultiplier = 1,
+    drawUnderstory = true
   ) => {
     const x = Math.round(cx);
     const y = Math.round(cy);
@@ -11032,53 +11976,11 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     ctx.save();
     ctx.translate(x, y);
 
-    // 1. Sombra moteada del dosel proyectada al este-sureste
-    ctx.fillStyle = 'rgba(14, 38, 22, 0.18)';
-    ctx.beginPath();
-    ctx.ellipse(15 + shadowShift, 4, size * 0.42, size * 0.14, 0.08, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(14, 38, 22, 0.15)';
-    ctx.beginPath();
-    ctx.ellipse(24 + shadowShift, 1, size * 0.25, size * 0.10, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 2. Oclusión ambiental profunda y sombra de contacto oscura bajo el tronco
-    ctx.fillStyle = 'rgba(6, 18, 10, 0.65)';
-    ctx.beginPath();
-    ctx.ellipse(0, 3, size * 0.32, size * 0.11, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Núcleo más oscuro de contacto directo
-    ctx.fillStyle = 'rgba(2, 8, 4, 0.74)';
-    ctx.beginPath();
-    ctx.ellipse(0, 3, size * 0.18, size * 0.06, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Lecho de mantillo y tierra fértil donde brotan las raíces
-    ctx.fillStyle = 'rgba(54, 34, 16, 0.58)';
-    ctx.fillRect(-13, 1, 26, 4);
-
-    // Raíces leñosas visibles (root flares) extendiéndose a los lados
-    ctx.fillStyle = '#2b1708';
-    ctx.beginPath();
-    ctx.moveTo(-6, -4);
-    ctx.lineTo(-14, 3);
-    ctx.lineTo(-11, 4);
-    ctx.lineTo(-2, 0);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.moveTo(6, -4);
-    ctx.lineTo(14, 3);
-    ctx.lineTo(11, 4);
-    ctx.lineTo(2, 0);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.fillStyle = '#366b31';
-    ctx.fillRect(-16, 0, 8, 2);
-    ctx.fillRect(9, 1, 8, 2);
+    // La base (sombras, raíces y mantillo) se reutiliza desde la caché por
+    // sectores. El respaldo vivo sólo se usa si el canvas no está disponible.
+    if (drawUnderstory) {
+      drawNatalTreeUnderstory(ctx, size, shadowShift);
+    }
 
     // 3. Dibujo del árbol con variación orgánica de tono y brillo
     if (sprite) {
@@ -11087,15 +11989,21 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
       ctx.transform(1, 0, totalShear, 1, 0, 0);
       ctx.imageSmoothingEnabled = false;
 
-      // Variación sutil de color y matiz por semilla (sin alterar paleta base)
-      const tintVal = (hash2(x - 29, y + 19) - 0.5) * 26;
+      // Variación sutil de color y matiz por semilla (sin alterar paleta base).
+      // La copa teñida se reutiliza durante toda la sesión.
+      const tintVal = Math.round((hash2(x - 29, y + 19) - 0.5) * 26);
       const brightness = 88 + Math.round(seed * 20);
-      ctx.filter = `hue-rotate(${Math.round(tintVal)}deg) brightness(${brightness}%)`;
       // El roble alto se dibuja algo más esbelto: tercera silueta sin repetir el sprite.
       const spriteW = useTallVariant ? Math.round(size * 0.9) : size;
       const spriteH = useTallVariant ? Math.round(size * 1.06) : size;
-      ctx.drawImage(sprite, Math.round(-spriteW * 0.5), Math.round(-spriteH * 0.94), spriteW, spriteH);
-      ctx.filter = 'none';
+      const tinted = getTintedTreeSprite(sprite, spriteW, spriteH, tintVal, brightness);
+      if (tinted) {
+        ctx.drawImage(tinted, Math.round(-spriteW * 0.5), Math.round(-spriteH * 0.94), spriteW, spriteH);
+      } else {
+        ctx.filter = `hue-rotate(${tintVal}deg) brightness(${brightness}%)`;
+        ctx.drawImage(sprite, Math.round(-spriteW * 0.5), Math.round(-spriteH * 0.94), spriteW, spriteH);
+        ctx.filter = 'none';
+      }
       ctx.restore();
     } else {
       ctx.fillStyle = '#4a2a14';
@@ -11107,7 +12015,7 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     }
 
     // 4. Sotobosque espeso al pie: briznas, helechos, hojarasca y pequeñas piedras
-    const grassOffsets = [-17, -11, -5, 2, 8, 14];
+    const grassOffsets = NATAL_TREE_GRASS_OFFSETS;
     for (let gi = 0; gi < grassOffsets.length; gi++) {
       const gx = grassOffsets[gi] + Math.round((hash2(x + gi * 11, y - gi * 7) - 0.5) * 3);
       const gy = 3 + (gi % 2);
@@ -11148,7 +12056,7 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     ySorted.push({
       sortY,
       draw: () =>
-        drawHandcraftedTreeNatal(ctx, tree.x, tree.y, tree.variant, ti, elapsed, reducedMotion, treeScale),
+        drawHandcraftedTreeNatal(ctx, tree.x, tree.y, tree.variant, ti, elapsed, reducedMotion, treeScale, !canBakeUnderstory),
     });
   }
   for (const p of ISLA_NATAL_PALMS) {
@@ -11179,13 +12087,11 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     if (!isWorldBoxVisible(sr.x - 44, sr.y - 58, 88, 72, camX, camY, vw, vh)) continue;
     ySorted.push({ sortY: sr.y, draw: () => drawScenicRock(ctx, sr) });
   }
-  for (const b of NATAL_BUSHES) {
-    if (isIslaNatalPointOnPath(b.x, b.y)) continue;
+  for (const b of NATAL_RENDER_BUSHES) {
     if (!isWorldBoxVisible(b.x - 22, b.y - 26, 44, 34, camX, camY, vw, vh)) continue;
     ySorted.push({ sortY: b.y + 2, draw: () => drawBushCluster(ctx, b.x, b.y, b.seed, elapsed, reducedMotion) });
   }
-  for (const b of NATAL_PATH_SIDE_BUSHES) {
-    if (isIslaNatalPointOnPath(b.x, b.y)) continue;
+  for (const b of NATAL_RENDER_PATH_BUSHES) {
     if (!isWorldBoxVisible(b.x - 16, b.y - 20, 32, 28, camX, camY, vw, vh)) continue;
     ySorted.push({ sortY: b.y + 1, draw: () => drawBushCluster(ctx, b.x, b.y, b.seed, elapsed, reducedMotion, b.scale ?? 0.75) });
   }
@@ -11197,7 +12103,7 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
 
   // Peñascos, tronco, cargas del muelle y rocas costeras que dan cuerpo a los bloqueos del mapa.
   for (const solid of ISLA_NATAL_SOLIDS) {
-    if (solid.id === 'cabana' || solid.id === 'cobertizo' || solid.id === 'huerta') continue;
+    if (solid.id === 'cabana' || solid.id === 'cobertizo' || solid.id.startsWith('huerta')) continue;
     if (
       !isWorldBoxVisible(solid.x - 32, solid.y - 48, solid.w + 68, solid.h + 64, camX, camY, vw, vh)
     ) {
@@ -11227,12 +12133,29 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     }
   }
 
-  ySorted.push({
-    sortY: HUERTA_SPRITE_RECT.y + HUERTA_SPRITE_RECT.h - 8,
-    draw: () => drawHuertaGarden(ctx, elapsed, reducedMotion),
-  });
-  ySorted.push({ sortY: HUT_POS.y + 96, draw: () => drawHut(ctx, elapsed, reducedMotion) });
-  ySorted.push({ sortY: SHED_POS.y + 124, draw: () => drawShed(ctx, elapsed, arcadeState, reducedMotion) });
+  if (
+    isWorldBoxVisible(
+      huertaBounds.x,
+      huertaBounds.y + 190,
+      huertaBounds.w,
+      56,
+      camX,
+      camY,
+      vw,
+      vh
+    )
+  ) {
+    ySorted.push({
+      sortY: huertaBounds.y + 208,
+      draw: () => drawHuertaFenceForeground(ctx),
+    });
+  }
+  if (isWorldBoxVisible(HUT_POS.x - 60, HUT_POS.y - 140, 280, 300, camX, camY, vw, vh)) {
+    ySorted.push({ sortY: HUT_POS.y + 96, draw: () => drawHut(ctx, elapsed, reducedMotion) });
+  }
+  if (isWorldBoxVisible(SHED_POS.x - 50, SHED_POS.y - 130, 250, 300, camX, camY, vw, vh)) {
+    ySorted.push({ sortY: SHED_POS.y + 124, draw: () => drawShed(ctx, elapsed, arcadeState, reducedMotion) });
+  }
   for (const sign of ISLA_NATAL_SIGNS) {
     if (!isWorldBoxVisible(sign.x - 20, sign.y - 30, 40, 40, camX, camY, vw, vh)) continue;
     ySorted.push({
@@ -11240,10 +12163,18 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
       draw: () => drawSignWithContext(ctx, sign.x, sign.y),
     });
   }
-  ySorted.push({ sortY: SIGN_POS.y + 2, draw: () => drawSign(ctx) });
-  ySorted.push({ sortY: NET_POS.y + 8, draw: () => drawNet(ctx, elapsed) });
-  ySorted.push({ sortY: SHELLS_POI_POS.y + 8, draw: () => drawShellCluster(ctx, elapsed) });
-  ySorted.push({ sortY: MAILBOX_POS.y + 1, draw: () => drawMailbox(ctx) });
+  if (isWorldBoxVisible(SIGN_POS.x - 28, SIGN_POS.y - 46, 56, 64, camX, camY, vw, vh)) {
+    ySorted.push({ sortY: SIGN_POS.y + 2, draw: () => drawSign(ctx) });
+  }
+  if (isWorldBoxVisible(NET_POS.x - 46, NET_POS.y - 70, 92, 92, camX, camY, vw, vh)) {
+    ySorted.push({ sortY: NET_POS.y + 8, draw: () => drawNet(ctx, elapsed) });
+  }
+  if (isWorldBoxVisible(SHELLS_POI_POS.x - 56, SHELLS_POI_POS.y - 46, 112, 72, camX, camY, vw, vh)) {
+    ySorted.push({ sortY: SHELLS_POI_POS.y + 8, draw: () => drawShellCluster(ctx, elapsed) });
+  }
+  if (isWorldBoxVisible(MAILBOX_POS.x - 30, MAILBOX_POS.y - 54, 60, 72, camX, camY, vw, vh)) {
+    ySorted.push({ sortY: MAILBOX_POS.y + 1, draw: () => drawMailbox(ctx) });
+  }
   if (isWorldBoxVisible(MIRADOR_POS.x - 64, MIRADOR_POS.y - 40, 128, 52, camX, camY, vw, vh)) {
     ySorted.push({
       sortY: MIRADOR_POS.y + 2,
@@ -11316,7 +12247,7 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
   }
   ctx.globalAlpha = 1;
 
-  drawAmbientLife(ctx, camX, camY, vw, vh, elapsed, reducedMotion);
+  drawAmbientLife(ctx, camX, camY, vw, vh, elapsed, reducedMotion, quality);
 
   drawDepartureBeacon(ctx, elapsed, departureReady, reducedMotion);
 
@@ -11341,42 +12272,95 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
     ctx.restore();
   }
 
-  // Luz ambiental: farol de la cabaña, resplandor del cobertizo y sol poniente
+  // Luz ambiental: farol de la cabaña, resplandor del cobertizo y sol poniente.
+  // Cada foco se pinta sólo si su área entra en cámara.
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
 
-  const pools: { x: number; y: number; r: number; rgba: string }[] = [
-    { x: HUT_POS.x + 96, y: HUT_POS.y + 52, r: 74, rgba: 'rgba(255, 178, 92, 0.16)' },
-    { x: MAILBOX_POS.x, y: MAILBOX_POS.y - 24, r: 40, rgba: 'rgba(255, 214, 140, 0.1)' },
-  ];
+  if (isWorldBoxVisible(HUT_POS.x + 22, HUT_POS.y - 22, 148, 148, camX, camY, vw, vh)) {
+    const hutPool = getCachedRadialGradient(
+      ctx,
+      'pool-hut',
+      HUT_POS.x + 96,
+      HUT_POS.y + 52,
+      2,
+      74,
+      [
+        [0, 'rgba(255, 178, 92, 0.16)'],
+        [1, 'rgba(0, 0, 0, 0)'],
+      ]
+    );
+    ctx.fillStyle = hutPool;
+    ctx.fillRect(HUT_POS.x + 96 - 74, HUT_POS.y + 52 - 74, 148, 148);
+  }
 
-  if (arcadeState !== 'dusty') {
+  if (isWorldBoxVisible(MAILBOX_POS.x - 40, MAILBOX_POS.y - 64, 80, 80, camX, camY, vw, vh)) {
+    const mailboxPool = getCachedRadialGradient(
+      ctx,
+      'pool-mailbox',
+      MAILBOX_POS.x,
+      MAILBOX_POS.y - 24,
+      2,
+      40,
+      [
+        [0, 'rgba(255, 214, 140, 0.1)'],
+        [1, 'rgba(0, 0, 0, 0)'],
+      ]
+    );
+    ctx.fillStyle = mailboxPool;
+    ctx.fillRect(MAILBOX_POS.x - 40, MAILBOX_POS.y - 24 - 40, 80, 80);
+  }
+
+  if (
+    arcadeState !== 'dusty' &&
+    isWorldBoxVisible(
+      ISLA_NATAL_ARCADE_ANCHOR.x - 150,
+      ISLA_NATAL_ARCADE_ANCHOR.y - 196,
+      300,
+      300,
+      camX,
+      camY,
+      vw,
+      vh
+    )
+  ) {
     const intensity = arcadeState === 'won' ? 0.3 + signalPulse * 0.35 : 0.18 + charge * 0.16;
-    pools.push({
-      x: ISLA_NATAL_ARCADE_ANCHOR.x,
-      y: ISLA_NATAL_ARCADE_ANCHOR.y - 46,
-      r: 150,
-      rgba: `rgba(0, 243, 255, ${intensity.toFixed(3)})`,
-    });
+    const arcadePool = getCachedRadialGradient(
+      ctx,
+      'pool-arcade',
+      ISLA_NATAL_ARCADE_ANCHOR.x,
+      ISLA_NATAL_ARCADE_ANCHOR.y - 46,
+      2,
+      150,
+      [
+        [0, 'rgba(0, 243, 255, 1)'],
+        [1, 'rgba(0, 0, 0, 0)'],
+      ]
+    );
+    ctx.globalAlpha = intensity;
+    ctx.fillStyle = arcadePool;
+    ctx.fillRect(
+      ISLA_NATAL_ARCADE_ANCHOR.x - 150,
+      ISLA_NATAL_ARCADE_ANCHOR.y - 46 - 150,
+      300,
+      300
+    );
+    ctx.globalAlpha = 1;
   }
 
-  for (const pool of pools) {
-    const g = ctx.createRadialGradient(pool.x, pool.y, 2, pool.x, pool.y, pool.r);
-    g.addColorStop(0, pool.rgba);
-    g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(pool.x - pool.r, pool.y - pool.r, pool.r * 2, pool.r * 2);
+  // Sol bajo al oeste: baño cálido sobre la isla. Su halo mide 1500 px; si el
+  // encuadre queda fuera de ese radio no aporta nada y se omite.
+  const sunDX = Math.max(0, Math.abs(camX + vw * 0.5 - 120) - vw * 0.5);
+  const sunDY = Math.max(0, Math.abs(camY + vh * 0.5 - 420) - vh * 0.5);
+  if (sunDX * sunDX + sunDY * sunDY < 1500 * 1500) {
+    const sun = getCachedRadialGradient(ctx, 'sun-glow', 120, 420, 10, 1500, [
+      [0, 'rgba(255, 196, 120, 0.26)'],
+      [0.35, 'rgba(255, 168, 100, 0.1)'],
+      [1, 'rgba(255, 150, 90, 0)'],
+    ]);
+    ctx.fillStyle = sun;
+    ctx.fillRect(camX, camY, vw, vh);
   }
-
-  // Sol bajo al oeste: baño cálido sobre la isla
-  const sunX = 120;
-  const sunY = 420;
-  const sun = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, 1500);
-  sun.addColorStop(0, 'rgba(255, 196, 120, 0.26)');
-  sun.addColorStop(0.35, 'rgba(255, 168, 100, 0.1)');
-  sun.addColorStop(1, 'rgba(255, 150, 90, 0)');
-  ctx.fillStyle = sun;
-  ctx.fillRect(camX, camY, vw, vh);
   ctx.restore();
 
   // Corrupción de señal en el cielo de la isla durante la anomalía
@@ -11419,7 +12403,8 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
       ctx.strokeStyle = 'rgba(180, 208, 240, 0.22)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      const rainCount = Math.round((reducedMotion ? 44 : 96) * fade);
+      const rainDensity = reducedMotion ? 44 : quality === 2 ? 52 : quality === 1 ? 72 : 96;
+      const rainCount = Math.round(rainDensity * fade);
       for (let i = 0; i < rainCount; i += 1) {
         const n1 = hash2(i * 37 + 11, 3);
         const n2 = hash2(i * 53 + 5, 7);
@@ -11479,47 +12464,81 @@ export function renderIslaNatalFrame(params: IslaNatalRenderParams): void {
   ctx.restore();
 
   // Viñeta suave en espacio de pantalla
-  const vig = ctx.createRadialGradient(vw / 2, vh / 2, Math.min(vw, vh) * 0.36, vw / 2, vh / 2, Math.max(vw, vh) * 0.8);
-  vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
-  vig.addColorStop(1, 'rgba(4, 10, 20, 0.45)');
+  const vig = getCachedRadialGradient(
+    ctx,
+    `vignette:${vw}x${vh}`,
+    vw / 2,
+    vh / 2,
+    Math.min(vw, vh) * 0.36,
+    Math.max(vw, vh) * 0.8,
+    [
+      [0, 'rgba(0, 0, 0, 0)'],
+      [1, 'rgba(4, 10, 20, 0.45)'],
+    ]
+  );
   ctx.fillStyle = vig;
   ctx.fillRect(0, 0, vw, vh);
 
   if (!nightStorm || (nightStorm.fade ?? 1) < 0.7) {
     // Neblina cálida del atardecer y frescor del mar en el borde inferior
-    const haze = ctx.createLinearGradient(0, 0, 0, vh);
-    haze.addColorStop(0, 'rgba(255, 190, 126, 0.13)');
-    haze.addColorStop(0.42, 'rgba(255, 172, 114, 0.05)');
-    haze.addColorStop(0.78, 'rgba(90, 120, 170, 0.04)');
-    haze.addColorStop(1, 'rgba(52, 46, 96, 0.13)');
+    const haze = getCachedLinearGradient(
+      ctx,
+      `haze:${vw}x${vh}`,
+      0,
+      0,
+      0,
+      vh,
+      [
+        [0, 'rgba(255, 190, 126, 0.13)'],
+        [0.42, 'rgba(255, 172, 114, 0.05)'],
+        [0.78, 'rgba(90, 120, 170, 0.04)'],
+        [1, 'rgba(52, 46, 96, 0.13)'],
+      ]
+    );
     ctx.fillStyle = haze;
     ctx.fillRect(0, 0, vw, vh);
 
-    // Rayo de sol rasante desde el oeste (sutil, acompaña al sol del mapa)
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    const ray = ctx.createLinearGradient(0, vh * 0.18, vw * 0.7, vh * 0.82);
-    ray.addColorStop(0, 'rgba(255, 200, 130, 0.07)');
-    ray.addColorStop(1, 'rgba(255, 160, 100, 0)');
-    ctx.fillStyle = ray;
-    ctx.fillRect(0, 0, vw, vh);
-    ctx.restore();
+    // Rayo de sol rasante desde el oeste (sutil, acompaña al sol del mapa).
+    // Es un velo atmosférico de pantalla completa: con calidad reducida se omite.
+    if (quality === 0) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const ray = getCachedLinearGradient(
+        ctx,
+        `sun-ray:${vw}x${vh}`,
+        0,
+        vh * 0.18,
+        vw * 0.7,
+        vh * 0.82,
+        [
+          [0, 'rgba(255, 200, 130, 0.07)'],
+          [1, 'rgba(255, 160, 100, 0)'],
+        ]
+      );
+      ctx.fillStyle = ray;
+      ctx.fillRect(0, 0, vw, vh);
+      ctx.restore();
+    }
 
     // Bloom localizado del sol bajo. Puramente atmosférico: no toca objetos,
     // colisiones ni lectura, y sólo se pinta si el sol entra en cuadro.
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    const sunSX = 120 - camX;
-    const sunSY = 420 - camY;
-    if (sunSX > -360 && sunSX < vw + 360 && sunSY > -360 && sunSY < vh + 360) {
-      const bloom = ctx.createRadialGradient(sunSX, sunSY, 4, sunSX, sunSY, 340);
-      bloom.addColorStop(0, 'rgba(255, 232, 176, 0.14)');
-      bloom.addColorStop(0.38, 'rgba(255, 198, 126, 0.06)');
-      bloom.addColorStop(1, 'rgba(255, 168, 100, 0)');
-      ctx.fillStyle = bloom;
-      ctx.fillRect(sunSX - 340, sunSY - 340, 680, 680);
+    if (quality < 2) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const sunSX = 120 - camX;
+      const sunSY = 420 - camY;
+      if (sunSX > -360 && sunSX < vw + 360 && sunSY > -360 && sunSY < vh + 360) {
+        const bloom = getCachedRadialGradient(ctx, 'sun-bloom', 0, 0, 4, 340, [
+          [0, 'rgba(255, 232, 176, 0.14)'],
+          [0.38, 'rgba(255, 198, 126, 0.06)'],
+          [1, 'rgba(255, 168, 100, 0)'],
+        ]);
+        ctx.translate(sunSX, sunSY);
+        ctx.fillStyle = bloom;
+        ctx.fillRect(-340, -340, 680, 680);
+      }
+      ctx.restore();
     }
-    ctx.restore();
   }
   if (nightStorm && (nightStorm.fade ?? 1) > 0.05) {
     // La noche cierra el encuadre con un velo azul frío en los bordes. El velo

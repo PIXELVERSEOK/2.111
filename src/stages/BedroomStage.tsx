@@ -18,7 +18,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pause, Play, SkipForward, Volume2, VolumeX } from 'lucide-react';
+import { ChevronRight, Pause, Play, SkipForward, Volume2, VolumeX } from 'lucide-react';
 import { bgmEngine } from '../audio/bgmEngine';
 import {
   renderPixelVxAce4Dir,
@@ -31,6 +31,7 @@ import {
   BEDROOM_INTERACTABLES,
   BEDROOM_PLAY_SPEED,
   BEDROOM_PLAY_ZOOM,
+  BEDROOM_SCENE_CUES,
   BEDROOM_SOLIDS,
   BEDROOM_TIMELINE,
   BEDROOM_W,
@@ -68,6 +69,8 @@ export interface BedroomStageProps {
 }
 
 const STAND_X = 427;
+/** Cadencia del texto del prólogo; también fija cuándo está completo. */
+const BEDROOM_LINE_SPEED_MS = 58;
 const STAND_FEET_Y = 224;
 const DOOR_PARK_X = 108;
 const DOOR_PARK_Y = 264;
@@ -204,7 +207,15 @@ function computeBedPose(t: number): BedPixelPose {
   return pose;
 }
 
-function TypewriterText({ text, speed = 46 }: { text: string; speed?: number }) {
+function TypewriterText({
+  text,
+  speed = 46,
+  revealAll = false,
+}: {
+  text: string;
+  speed?: number;
+  revealAll?: boolean;
+}) {
   const [count, setCount] = useState(0);
   useEffect(() => {
     setCount(0);
@@ -220,10 +231,17 @@ function TypewriterText({ text, speed = 46 }: { text: string; speed?: number }) 
     }, speed);
     return () => window.clearInterval(id);
   }, [text, speed]);
+
+  // «Siguiente escena» puede completar el texto en curso sin cortar la escena.
+  useEffect(() => {
+    if (revealAll) setCount(text.length);
+  }, [revealAll, text]);
+
+  const shown = revealAll ? text.length : count;
   return (
     <span>
-      {text.slice(0, count)}
-      {count < text.length && <span className="bedroom-caret" aria-hidden="true" />}
+      {text.slice(0, shown)}
+      {shown < text.length && <span className="bedroom-caret" aria-hidden="true" />}
     </span>
   );
 }
@@ -255,7 +273,13 @@ export function BedroomStage({
   const [showHints, setShowHints] = useState(false);
   const [nearId, setNearId] = useState<string | null>(null);
   const [dialogue, setDialogue] = useState<BedroomDialogue | null>(null);
+  // Primera pulsación de E/Espacio completa la frase; la siguiente avanza.
+  const [dialogueRevealed, setDialogueRevealed] = useState(false);
+  const dialogueRevealedRef = useRef(false);
+  dialogueRevealedRef.current = dialogueRevealed;
   const [isMuted, setIsMuted] = useState<boolean>(() => bgmEngine.isMuted());
+  const [forceLine, setForceLine] = useState(false);
+  const nextSceneAtRef = useRef(0);
 
   const elapsedRef = useRef(0);
   const worldTimeRef = useRef(0);
@@ -301,6 +325,8 @@ export function BedroomStage({
 
   const openDialogue = useCallback((next: BedroomDialogue | null) => {
     dialogueRef.current = next;
+    dialogueRevealedRef.current = false;
+    setDialogueRevealed(false);
     setDialogue(next);
   }, []);
 
@@ -327,6 +353,7 @@ export function BedroomStage({
     cameraRef.current = { x: endCam.x, y: endCam.y, zoom: endCam.zoom };
     setNearId(null);
     nearRef.current = null;
+    setForceLine(false);
     bedroomStormAudio.rewindCues(BEDROOM_TIMELINE.handoff);
     onWakeRef.current?.();
     setShowHints(true);
@@ -464,11 +491,59 @@ export function BedroomStage({
   const interactRef = useRef(interact);
   interactRef.current = interact;
 
+  // E/Espacio: completa el texto visible y, en la siguiente pulsación, avanza.
+  const advanceDialogueRef = useRef<() => void>(() => {});
+  advanceDialogueRef.current = () => {
+    if (dialogueRef.current && !dialogueRevealedRef.current) {
+      dialogueRevealedRef.current = true;
+      setDialogueRevealed(true);
+      bedroomStormAudio.tick();
+      return;
+    }
+    interactRef.current();
+  };
+
   const skipScene = useCallback(() => {
     setPaused(false);
     pausedRef.current = false;
     enterPlayRef.current();
   }, []);
+
+  /**
+   * Avance manual del prólogo: la primera pulsación completa el texto en
+   * curso; la siguiente salta al bloque narrativo inmediatamente posterior.
+   */
+  const nextCutsceneBlock = useCallback(() => {
+    if (phaseRef.current !== 'cutscene' || pausedRef.current) return;
+    const now = performance.now();
+    if (now - nextSceneAtRef.current < 220) return;
+    nextSceneAtRef.current = now;
+
+    const t = elapsedRef.current;
+    const lineSpan =
+      (BEDROOM_DIALOGUE_LINE.length * BEDROOM_LINE_SPEED_MS) / 1000;
+    const lineTyping =
+      !forceLine &&
+      t >= BEDROOM_TIMELINE.dialogueStart &&
+      t <= BEDROOM_TIMELINE.dialogueEnd + 0.1 &&
+      t - BEDROOM_TIMELINE.dialogueStart < lineSpan;
+    if (lineTyping) {
+      setForceLine(true);
+      return;
+    }
+
+    const target = BEDROOM_SCENE_CUES.find((cue) => cue > t + 0.01);
+    if (target === undefined) return;
+
+    elapsedRef.current = target;
+    uiSyncRef.current = -1;
+    setUiTime(target);
+    setForceLine(false);
+    bedroomStormAudio.rewindCues(target);
+    if (target >= BEDROOM_TIMELINE.handoff) enterPlayRef.current();
+  }, [forceLine]);
+  const nextCutsceneRef = useRef(nextCutsceneBlock);
+  nextCutsceneRef.current = nextCutsceneBlock;
 
   /* =====================================================
      AUDIO
@@ -523,6 +598,14 @@ export function BedroomStage({
       if (isEditableTarget(event.target)) return;
       const key = event.key.toLowerCase();
 
+      // Espacio/Enter sobre un botón enfocado activan ese botón (por ejemplo
+      // «Siguiente escena») sin disparar además la interacción de la escena.
+      const target = event.target;
+      const onControl =
+        target instanceof HTMLElement &&
+        !!target.closest('button, a, [role="button"]');
+      if (onControl && (key === ' ' || key === 'enter')) return;
+
       if (key === 'escape') {
         event.preventDefault();
         togglePauseRef.current();
@@ -535,15 +618,18 @@ export function BedroomStage({
           event.preventDefault();
           togglePauseRef.current();
         }
-        if (key === ' ' || key === 'enter' || key.startsWith('arrow')) {
+        if (key === ' ' || key === 'enter' || key === 'e' || key.startsWith('arrow')) {
           event.preventDefault();
+          if (key === ' ' || key === 'enter' || key === 'e') {
+            nextCutsceneRef.current();
+          }
         }
         return;
       }
 
       if (key === 'e' || key === 'enter' || key === ' ') {
         event.preventDefault();
-        interactRef.current();
+        advanceDialogueRef.current();
         return;
       }
 
@@ -1051,6 +1137,17 @@ export function BedroomStage({
     uiTime >= BEDROOM_TIMELINE.dialogueStart &&
     uiTime <= BEDROOM_TIMELINE.dialogueEnd + 0.1;
 
+  const lineTyping =
+    showStoryLine &&
+    !forceLine &&
+    uiTime - BEDROOM_TIMELINE.dialogueStart <
+      (BEDROOM_DIALOGUE_LINE.length * BEDROOM_LINE_SPEED_MS) / 1000;
+  const hasNextCutsceneBlock = BEDROOM_SCENE_CUES.some(
+    (cue) => cue > uiTime + 0.01
+  );
+  const showNextCutscene =
+    phase === 'cutscene' && !paused && (lineTyping || hasNextCutsceneBlock);
+
   const isRadio = dialogue?.kind === 'radio';
   const dialogueSpeaker = dialogue?.speakers?.[dialogue.index] ?? dialogue?.title ?? '';
 
@@ -1092,9 +1189,27 @@ export function BedroomStage({
         <div className="bedroom-story-line" aria-live="polite">
           <span className="bedroom-story-line__name">PIXEL</span>
           <p className="bedroom-story-line__text">
-            <TypewriterText text={BEDROOM_DIALOGUE_LINE} speed={58} />
+            <TypewriterText
+              text={BEDROOM_DIALOGUE_LINE}
+              speed={BEDROOM_LINE_SPEED_MS}
+              revealAll={forceLine}
+            />
           </p>
         </div>
+      )}
+
+      {showNextCutscene && (
+        <button
+          type="button"
+          className="bedroom-next"
+          onClick={nextCutsceneBlock}
+          onKeyDown={(event) => event.stopPropagation()}
+          aria-label="Siguiente escena"
+          title="Avanzar a la siguiente escena"
+        >
+          <span>Siguiente escena</span>
+          <ChevronRight aria-hidden="true" />
+        </button>
       )}
 
       {phase === 'play' && !dialogue && !paused && !showHints && nearItem && promptAction && (
@@ -1122,19 +1237,28 @@ export function BedroomStage({
             </span>
           </div>
           <p className="bedroom-dialogue__text" key={`${dialogue.title}-${dialogue.index}`}>
-            <TypewriterText text={dialogue.lines[dialogue.index]} speed={isRadio ? 54 : 46} />
+            <TypewriterText
+              text={dialogue.lines[dialogue.index]}
+              speed={isRadio ? 54 : 46}
+              revealAll={dialogueRevealed}
+            />
           </p>
           <div className="bedroom-dialogue__foot">
             <span>
               {dialogue.index < dialogue.lines.length - 1
                 ? isRadio
-                  ? 'E · Seguir escuchando'
-                  : 'E · Continuar'
+                  ? 'E / ESPACIO · Seguir escuchando'
+                  : 'E / ESPACIO · Continuar'
                 : isRadio
-                  ? 'E · Cortar la señal'
-                  : 'E · Cerrar'}
+                  ? 'E / ESPACIO · Cortar la señal'
+                  : 'E / ESPACIO · Cerrar'}
             </span>
-            <button type="button" className="bedroom-dialogue__next" onClick={interact}>
+            <button
+              type="button"
+              className="bedroom-dialogue__next"
+              onClick={interact}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
               {dialogue.index < dialogue.lines.length - 1
                 ? isRadio
                   ? 'Seguir'

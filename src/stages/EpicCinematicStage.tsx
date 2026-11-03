@@ -15,12 +15,13 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pause, Play, SkipForward, Volume2, VolumeX } from 'lucide-react';
+import { ChevronRight, Pause, Play, SkipForward, Volume2, VolumeX } from 'lucide-react';
 import { bgmEngine } from '../audio/bgmEngine';
 import { retroAudio } from '../audio/retroAudio';
 import { cinematicRebootAudio } from './cinematicRebootAudio';
 import {
   CINEMATIC_IMAGE_DURATION_SEC,
+  CINEMATIC_IMAGE_SCENES,
   getActiveImageBeatAtTime,
   getImageSceneAt,
 } from './cinematicImageTimeline';
@@ -67,7 +68,10 @@ export function EpicCinematicStage({
   const [isPaused, setIsPaused] = useState(false);
   const [isMuted, setIsMuted] = useState(() => bgmEngine.isMuted());
   const [uiTimeSec, setUiTimeSec] = useState(0);
+  const [forcedBeatId, setForcedBeatId] = useState<string | null>(null);
   const [reducedMotion, setReducedMotion] = useState(false);
+  const nextAdvanceRef = useRef(0);
+  const advanceSceneRef = useRef<() => void>(() => {});
 
   const playbackRef = useRef({
     elapsedSec: 0,
@@ -131,6 +135,8 @@ export function EpicCinematicStage({
     };
     setIsPaused(false);
     setUiTimeSec(segmentStart);
+    setForcedBeatId(null);
+    nextAdvanceRef.current = 0;
 
     cinematicRebootAudio.resetImageTimeline(segmentStart);
 
@@ -201,10 +207,23 @@ export function EpicCinematicStage({
     };
   }, [finishCinematic, reducedMotion]);
 
-  // Espacio o Escape omiten la cinemática; P pausa.
+  // E o Espacio adelantan el subtítulo/escena; Escape omite la cinemática; P pausa.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === ' ' || event.key === 'Escape') {
+      // Espacio/Enter sobre un control enfocado deben activar ese control
+      // (p. ej. «Siguiente escena») y no saltar la secuencia completa.
+      const target = event.target;
+      const onControl =
+        target instanceof HTMLElement &&
+        !!target.closest('button, a, input, textarea, select, [role="button"]');
+      if (onControl && (event.key === ' ' || event.key === 'Enter')) return;
+
+      if (event.key === ' ' || event.key === 'e' || event.key === 'E') {
+        event.preventDefault();
+        advanceSceneRef.current();
+        return;
+      }
+      if (event.key === 'Escape') {
         event.preventDefault();
         finishCinematic();
         return;
@@ -225,12 +244,53 @@ export function EpicCinematicStage({
     [activeBeat]
   );
 
-  let revealedWords = words.length;
+  let rawRevealedWords = words.length;
   if (activeBeat && words.length > 0) {
     const span = Math.max(0.6, activeBeat.endSec - activeBeat.startSec);
     const progress = ramp01((uiTimeSec - activeBeat.startSec) / (span * 0.74));
-    revealedWords = Math.max(1, Math.ceil(progress * words.length));
+    rawRevealedWords = Math.max(1, Math.ceil(progress * words.length));
   }
+
+  const isTextRevealing =
+    !!activeBeat && words.length > 0 && rawRevealedWords < words.length;
+  const textForced = !!activeBeat && forcedBeatId === activeBeat.id;
+  const revealedWords = textForced ? words.length : rawRevealedWords;
+
+  const nextScene =
+    CINEMATIC_IMAGE_SCENES.find(
+      (scene) => scene.index === activeScene.index + 1
+    ) ?? null;
+  const hasNextScene =
+    !!nextScene && nextScene.startSec < segmentEndRef.current - 0.05;
+  const showNextScene =
+    !isPaused && (hasNextScene || (isTextRevealing && !textForced));
+
+  /**
+   * Una pulsación completa el subtítulo que se está escribiendo o, si ya está
+   * completo, salta al inicio exacto de la escena siguiente. La guarda de
+   * tiempo evita que un doble clic consuma dos bloques.
+   */
+  const handleNextScene = () => {
+    const pb = playbackRef.current;
+    if (pb.finished || pb.paused) return;
+    const now = performance.now();
+    if (now - nextAdvanceRef.current < 220) return;
+    nextAdvanceRef.current = now;
+
+    if (isTextRevealing && !textForced && activeBeat) {
+      setForcedBeatId(activeBeat.id);
+      return;
+    }
+    if (!nextScene || !hasNextScene) return;
+
+    const target = Math.max(segmentStartRef.current, nextScene.startSec);
+    pb.elapsedSec = target;
+    pb.lastUiSyncSec = -1;
+    setForcedBeatId(null);
+    setUiTimeSec(target);
+    cinematicRebootAudio.resetImageTimeline(target);
+  };
+  advanceSceneRef.current = handleNextScene;
 
   const sceneLocalSec = uiTimeSec - activeScene.startSec;
   const sceneTagOpacity = Math.min(
@@ -259,6 +319,20 @@ export function EpicCinematicStage({
           <span className="cr-scene-tag__rule" />
           <span className="cr-scene-tag__label">{activeScene.label}</span>
         </div>
+      )}
+
+      {showNextScene && (
+        <button
+          type="button"
+          className="cr-next"
+          onClick={handleNextScene}
+          onKeyDown={(event) => event.stopPropagation()}
+          aria-label="Siguiente escena"
+          title="Avanzar subtítulo o escena (E / Espacio)"
+        >
+          <span>Siguiente escena</span>
+          <ChevronRight aria-hidden="true" />
+        </button>
       )}
 
       {activeBeat && (
@@ -303,7 +377,7 @@ export function EpicCinematicStage({
           type="button"
           onClick={finishCinematic}
           className="cr-skip"
-          title="Omitir cinemática (Espacio o Esc)"
+          title="Omitir cinemática (Esc)"
         >
           <SkipForward />
           <span>Omitir</span>

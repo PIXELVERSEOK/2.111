@@ -23,6 +23,7 @@ import { retroAudio } from '../audio/retroAudio';
 import { getHistoricalMemory } from '../memories/historicalCatalog';
 import { MemoryUnlockedModal } from '../memories/MemoryUnlockedModal';
 import { drawPixelAvatar4Dir } from '../island/island70sRenderer';
+import { cameraFollowFactor } from '../island/cameraFollow';
 import type { AvatarAppearance } from '../avatar/avatarOptions';
 
 export interface GlitchTrailStageProps {
@@ -1677,8 +1678,10 @@ export function GlitchTrailStage({
         Math.min(LEVEL_W - vw, player.x - vw * 0.36 + player.facing * 55)
       );
       const targetCamY = Math.max(0, Math.min(LEVEL_H - vh, player.y - vh * 0.56));
-      camera.x += (targetCamX - camera.x) * Math.min(1, dt * 7);
-      camera.y += (targetCamY - camera.y) * Math.min(1, dt * 6);
+      const camFollowX = cameraFollowFactor(dt, 7);
+      const camFollowY = cameraFollowFactor(dt, 6);
+      camera.x += (targetCamX - camera.x) * camFollowX;
+      camera.y += (targetCamY - camera.y) * camFollowY;
 
       // ================================================================
       // RENDERIZADO HD-2D CON PARALLAX MULTICAPA Y VIEWPORT CULLING

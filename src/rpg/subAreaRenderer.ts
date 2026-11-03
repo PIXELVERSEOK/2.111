@@ -56,6 +56,8 @@ export interface SubAreaRenderParams {
     walking: boolean;
     sprinting: boolean;
     interactAnim: number;
+    /** Tiempo de marcha por distancia real (sistema compartido de movimiento). */
+    walkFrameIndex?: number;
   };
   skinColor: string;
   hairColor: string;
@@ -4000,6 +4002,7 @@ export function renderSubAreaFrame(params: SubAreaRenderParams): void {
       lanternActive: progressState.rpg.lanternActive,
       interactAnim: player.interactAnim,
       appearance,
+      walkFrameIndex: player.walkFrameIndex,
     }
   );
 

@@ -61,6 +61,15 @@ import {
 } from '../rpg/rpgContent';
 import { RpgInventoryModal, RpgQuestsModal } from '../rpg/rpgModals';
 import type { AvatarAppearance } from '../avatar/avatarOptions';
+import {
+  PIXEL_SPRINT_SPEED,
+  PIXEL_WALK_SPEED,
+  advancePixelWalkCycle,
+  createPixelWalkCycle,
+  pixelStepParity,
+  pixelWalkFrame,
+  resetPixelWalkCycle,
+} from '../avatar/pixelMotion';
 import { CastleBossCombatState, renderSubAreaFrame } from '../rpg/subAreaRenderer';
 import {
   DISTANT_DECADE_VISTAS,
@@ -100,6 +109,7 @@ import {
   IslandPickupBurst,
   renderIsland70sFrame,
 } from './island70sRenderer';
+import { cameraFollowFactor } from './cameraFollow';
 
 const ISLAND_CAMERA_TOP = ISLAND_WORLD_TOP - 48;
 
@@ -535,6 +545,11 @@ export function Origin70sIsland({
     progressState.island70s.activatedIslandSwitches,
     allUnlocked
   );
+  // El paso de troncos hacia el islote del lago sólo existe cuando la memoria
+  // del Cruce de Circuitos quedó restaurada. La colisión debe recibir este
+  // flag o el cofre del lago resulta inalcanzable incluso tras ganar Frogger.
+  const origenFroggerCleared =
+    allUnlocked || Boolean(progressState.games['frogger']?.memoryUnlocked);
 
   const hasOrigenEvent = (eventId: string) =>
     allUnlocked || progressState.island70s.narrativeEvents.includes(eventId);
@@ -563,7 +578,11 @@ export function Origin70sIsland({
       isPointWalkableOnIsland(
         progressState.island70s.lastIslandPos.x,
         progressState.island70s.lastIslandPos.y,
-        { southShortcut: southShortcutActive, gargantaBridge: glitchTrailCleared }
+        {
+          southShortcut: southShortcutActive,
+          gargantaBridge: glitchTrailCleared,
+          froggerCleared: origenFroggerCleared,
+        }
       ) &&
       !isBlockedByExteriorBuilding(
         progressState.island70s.lastIslandPos.x,
@@ -1271,6 +1290,9 @@ export function Origin70sIsland({
             isPointWalkableOnIsland(pd.x, pd.y, {
               southShortcut: state.southShortcutActive,
               gargantaBridge: state.glitchTrailCleared,
+              froggerCleared:
+                state.allUnlocked ||
+                Boolean(state.progressState.games['frogger']?.memoryUnlocked),
             })
           ) &&
             !isBlockedByExteriorBuilding(pd.x, pd.y) &&
@@ -2268,6 +2290,32 @@ export function Origin70sIsland({
         if (!chest) return;
         const alreadyOpened = st.progressState.rpg.openedChestIds.includes(chest.id);
         if (alreadyOpened) {
+          // Compatibilidad: el cofre del lago entrega dos materiales que se
+          // consumen al entregarlos. Si una partida antigua registró el cofre
+          // pero perdió un material aún no entregado, se repone sólo ese.
+          if (chest.id === 'chest-lago-germanio') {
+            const narrative = st.progressState.island70s.narrativeEvents;
+            const inventory = st.progressState.rpg.inventoryItems;
+            const missing: string[] = [];
+            if (
+              !inventory.includes('item-transistores-germanio-lago') &&
+              !narrative.includes('origen-germanio-entregado')
+            ) {
+              missing.push('item-transistores-germanio-lago');
+            }
+            if (
+              !inventory.includes('item-componentes-estano') &&
+              !narrative.includes('origen-soldador-entregado')
+            ) {
+              missing.push('item-componentes-estano');
+            }
+            if (missing.length > 0) {
+              callbacksRef.current.onGrantInventoryItems?.(missing);
+              retroAudio.chestOpen();
+              showToast('Materiales del lago recuperados · Revisá tu mochila.');
+              return;
+            }
+          }
           retroAudio.uiClick();
           showToast(`${chest.label} · Ya has recuperado su tesoro.`);
           return;
@@ -2451,6 +2499,25 @@ export function Origin70sIsland({
                 accentHex: '#22c55e',
               });
             }, 2600);
+            return;
+          }
+          // Compatibilidad con partidas antiguas: si el montículo del engranaje
+          // figura excavado pero la pieza no está en la mochila y el puente
+          // sigue cerrado, se recupera para no dejar el paso bloqueado.
+          if (st.progressState.rpg.openedChestIds.includes('mound-engranaje-puente')) {
+            callbacksRef.current.onGrantInventoryItems?.(['item-engranaje-puente']);
+            retroAudio.shardCollect(3);
+            showToast('Engranaje del Puente recuperado junto al torno.');
+            setActiveDialog({
+              category: exam.category,
+              title: exam.label,
+              subtitle: 'Engranaje recuperado · Listo para montar',
+              paragraphs: [
+                'La rueda dentada había quedado guardada junto al torno. La recuperás y comprobás que los dientes siguen intactos.',
+              ],
+              hint: 'Accioná el torno nuevamente para montar el engranaje y desplegar el puente.',
+              accentHex: exam.accentHex,
+            });
             return;
           }
           retroAudio.npcBlip(0.7);
@@ -3020,10 +3087,25 @@ export function Origin70sIsland({
             'item-soldador-estaño'
           );
           const laserRepaired = narrative.includes('origen-laser-controles-reparados');
+          const soldadorChestOpened = st.progressState.rpg.openedChestIds.includes(
+            'origen-dylan-soldador'
+          );
+          const soldadorEntregado =
+            narrative.includes('origen-soldador-entregado') || soldadorChestOpened;
+          // Recuperación segura para partidas antiguas: si el encargo figura
+          // como entregado pero el soldador no está en la mochila, se repone
+          // sin duplicar el objeto ni reabrir el cofre.
+          if (soldadorEntregado && !hasSolderingIron) {
+            callbacksRef.current.onGrantInventoryItems?.(['item-soldador-estaño']);
+            if (!narrative.includes('origen-soldador-entregado')) {
+              callbacksRef.current.onRecordNarrativeEvent?.('origen-soldador-entregado');
+            }
+          }
+          const soldadorDisponible = hasSolderingIron || soldadorEntregado;
 
           // --- TRAMA PRINCIPAL: EL SOLDADOR Y LA PALANCA ---
           if (!laserDone) {
-            if (hasTinComponents && !hasSolderingIron && !laserRepaired) {
+            if (hasTinComponents && !soldadorDisponible && !laserRepaired) {
               setActiveDialog({
                 category: 'RETRO STATE TS · ENTREGA DE MATERIAL',
                 title: snpc.name,
@@ -3037,9 +3119,17 @@ export function Origin70sIsland({
                   label: 'Entregar Estaño y Recibir el Soldador',
                   onSelect: () => {
                     callbacksRef.current.onConsumeInventoryItems?.(['item-componentes-estano']);
-                    callbacksRef.current.onOpenChest('origen-dylan-soldador', [
-                      'item-soldador-estaño',
-                    ]);
+                    if (soldadorChestOpened) {
+                      // El cofre ya se había abierto en una partida anterior:
+                      // se repone la herramienta en lugar de perder el estaño.
+                      callbacksRef.current.onGrantInventoryItems?.([
+                        'item-soldador-estaño',
+                      ]);
+                    } else {
+                      callbacksRef.current.onOpenChest('origen-dylan-soldador', [
+                        'item-soldador-estaño',
+                      ]);
+                    }
                     callbacksRef.current.onRecordNarrativeEvent?.('origen-soldador-entregado');
                     callbacksRef.current.onUpdateQuest('quest-laser-seguridad', 'active');
                     retroAudio.questComplete();
@@ -3061,7 +3151,14 @@ export function Origin70sIsland({
               return;
             }
 
-            if (laserRepaired || hasSolderingIron) {
+            if (laserRepaired || soldadorDisponible) {
+              // Partidas antiguas pueden tener el soldador sin el evento de
+              // entrega registrado: se repara el estado para que la misión no
+              // quede con un objetivo permanentemente incompleto.
+              if (!narrative.includes('origen-soldador-entregado')) {
+                callbacksRef.current.onRecordNarrativeEvent?.('origen-soldador-entregado');
+              }
+              callbacksRef.current.onUpdateQuest('quest-laser-seguridad', 'active');
               setActiveDialog({
                 category: snpc.role.toUpperCase(),
                 title: snpc.name,
@@ -3085,7 +3182,10 @@ export function Origin70sIsland({
               return;
             }
 
-            // Dylan explica su necesidad de estaño
+            // Dylan explica su necesidad de estaño y el encargo queda activo
+            // desde esta primera conversación para que el gabinete Frogger no
+            // dependa de una misión que todavía no existe en el registro.
+            callbacksRef.current.onUpdateQuest('quest-laser-seguridad', 'active');
             setActiveDialog({
               category: snpc.role.toUpperCase(),
               title: snpc.name,
@@ -3172,6 +3272,8 @@ export function Origin70sIsland({
           const hasBatteries = st.progressState.rpg.inventoryItems.includes(
             'item-baterias-linterna'
           );
+          const bateriasChestOpened =
+            st.progressState.rpg.openedChestIds.includes('origen-kertz-baterias');
           const germaniumDelivered = narrative.includes('origen-germanio-entregado');
 
           // --- MISIÓN: TRANSISTORES DE GERMANIO Y LINTERNA ---
@@ -3190,9 +3292,17 @@ export function Origin70sIsland({
                   label: 'Entregar Germanio y Recibir Baterías',
                   onSelect: () => {
                     callbacksRef.current.onConsumeInventoryItems?.(['item-transistores-germanio-lago']);
-                    callbacksRef.current.onOpenChest('origen-kertz-baterias', [
-                      'item-baterias-linterna',
-                    ]);
+                    if (bateriasChestOpened) {
+                      // El cofre ya estaba abierto: se repone la recompensa en
+                      // lugar de consumir el germanio sin recibir nada.
+                      callbacksRef.current.onGrantInventoryItems?.([
+                        'item-baterias-linterna',
+                      ]);
+                    } else {
+                      callbacksRef.current.onOpenChest('origen-kertz-baterias', [
+                        'item-baterias-linterna',
+                      ]);
+                    }
                     callbacksRef.current.onRecordNarrativeEvent?.('origen-germanio-entregado');
                     retroAudio.questComplete();
                     setActiveDialog({
@@ -3229,6 +3339,13 @@ export function Origin70sIsland({
             return;
           }
 
+          // Recuperación segura: si el germanio ya se entregó pero las
+          // baterías no están en la mochila (partida antigua o recompensa
+          // perdida), se reponen sin duplicar el objeto.
+          if (!hasBatteries) {
+            callbacksRef.current.onGrantInventoryItems?.(['item-baterias-linterna']);
+          }
+
           // --- LÓGICA ORIGINAL DE KERTZ (GENERADOR Y SOLDADOR LÓGICO) ---
           const qDone = st.progressState.rpg.questStates['quest-taller-ttl'] === 'completed';
           const generatorRepaired = st.progressState.island70s.narrativeEvents.includes(
@@ -3242,7 +3359,62 @@ export function Origin70sIsland({
           const generatorQuest = st.progressState.rpg.questStates['quest-generador-retrostate'] === 'active';
 
           if (!generatorRepaired) {
+            const froggerCleared =
+              st.allUnlocked ||
+              Boolean(st.progressState.games['frogger']?.memoryUnlocked);
+            const partChestOpened =
+              st.progressState.rpg.openedChestIds.includes('origen-frogger-part');
+            // Si el jugador ya había superado Frogger antes de recibir este
+            // encargo, la recompensa pendiente se entrega ahora en vez de
+            // obligarlo a repetir el minijuego.
+            const pendingFroggerPart =
+              froggerCleared && !hasPart && !partDelivered;
+            if (pendingFroggerPart) {
+              callbacksRef.current.onUpdateQuest('quest-generador-retrostate', 'active');
+              setActiveDialog({
+                category: 'RETRO STATE TS · RECOMPENSA PENDIENTE',
+                title: snpc.name,
+                subtitle: 'La pieza del cruce ya está impresa',
+                paragraphs: [
+                  '«Pixel, el generador del Sector 03 se quedó sin rotor y el taller está a oscuras. Íbamos a necesitar la pieza que imprime el Cruce de Circuitos... pero vos ya superaste ese gabinete.»',
+                  '«La impresora dejó la pieza en la bandeja y yo la guardé al revisar el prototipo. La verifiqué: encaja en el rotor sin holgura.»',
+                ],
+                primaryAction: {
+                  label: 'Recibir la Pieza Verificada',
+                  onSelect: () => {
+                    if (partChestOpened) {
+                      callbacksRef.current.onGrantInventoryItems?.([
+                        'item-pieza-generador',
+                      ]);
+                    } else {
+                      callbacksRef.current.onOpenChest('origen-frogger-part', [
+                        'item-pieza-generador',
+                      ]);
+                    }
+                    callbacksRef.current.onConsumeInventoryItems?.([
+                      'item-pieza-generador',
+                    ]);
+                    callbacksRef.current.onRecordNarrativeEvent?.('origen-pieza-entregada');
+                    retroAudio.questComplete();
+                    setActiveDialog({
+                      category: 'RETRO STATE TS · MISIÓN CUMPLIDA',
+                      title: snpc.name,
+                      subtitle: 'Pieza recibida · Montala en el generador',
+                      paragraphs: [
+                        '«Perfecta. Encaja en el rotor sin holgura. Ahora llevala a la sala de máquinas y montala en el generador del Sector 03.»',
+                        '«Cuando arranque, el taller recupera luz y corriente. La compuerta de energía del bosque responde a otra cosa: la palanca de seguridad del Sector 03.»',
+                      ],
+                      hint: 'Examiná el Generador del Sector 03 en la sala de máquinas del taller y montá la pieza.',
+                      accentHex: '#22c55e',
+                    });
+                  },
+                },
+                accentHex: '#22c55e',
+              });
+              return;
+            }
             if (partDelivered) {
+              callbacksRef.current.onUpdateQuest('quest-generador-retrostate', 'active');
               setActiveDialog({
                 category: snpc.role.toUpperCase(),
                 title: snpc.name,
@@ -3257,6 +3429,7 @@ export function Origin70sIsland({
               return;
             }
             if (hasPart) {
+              callbacksRef.current.onUpdateQuest('quest-generador-retrostate', 'active');
               setActiveDialog({
                 category: 'RETRO STATE TS · ENTREGA DE PIEZA',
                 title: snpc.name,
@@ -4251,6 +4424,14 @@ export function Origin70sIsland({
             return;
           }
 
+          // Compatibilidad: si el sonar figura entregado o el cofre del amigo
+          // ya está abierto pero el emisor no está en la mochila, se repone.
+          if (!st.progressState.rpg.inventoryItems.includes('item-sonar-profundidad')) {
+            callbacksRef.current.onGrantInventoryItems?.(['item-sonar-profundidad']);
+            if (!st.progressState.island70s.narrativeEvents.includes('origen-sonar-entregado')) {
+              callbacksRef.current.onRecordNarrativeEvent?.('origen-sonar-entregado');
+            }
+          }
           const hasGear = st.progressState.rpg.inventoryItems.includes('item-engranaje-puente');
           const laserDone = st.origenGeneratorGateOpen;
           const generatorDone =
@@ -4758,7 +4939,11 @@ export function Origin70sIsland({
       walking: false,
       sprinting: false,
       interactAnim: 0,
+      walkFrameIndex: 0,
     };
+
+    // Fase de marcha compartida con Isla Natal y cualquier isla futura.
+    const walkCycle = createPixelWalkCycle();
 
     const camera = {
       x: Math.max(
@@ -4987,21 +5172,31 @@ export function Origin70sIsland({
       if (isActionPressed(e, 'interact', keybindings) || code === 'KeyE' || code === 'Enter' || code === 'Space') {
         if (e.repeat) return;
         if (latestStateRef.current.modalOpen) {
+          // Un diálogo activo se adelanta con E, Espacio o Enter: la primera
+          // pulsación revela el texto y la siguiente pasa de frase.
           if (
-            (code === 'KeyE' || code === 'Enter' || isActionPressed(e, 'interact', keybindings)) &&
+            activeDialogRef.current &&
+            (code === 'KeyE' ||
+              code === 'Enter' ||
+              code === 'Space' ||
+              isActionPressed(e, 'interact', keybindings)) &&
             !latestStateRef.current.chronoWarpActive
           ) {
             e.preventDefault();
             if (code === 'Enter') e.stopImmediatePropagation();
-            if (activeDialogRef.current && code === 'Enter') {
-              advanceDialogueRef.current();
-            } else {
-              setActiveDialog(null);
-              setCodexOpen(false);
-              setInventoryOpen(false);
-              setQuestsOpen(false);
-              setPowersMenuOpen(false);
-            }
+            advanceDialogueRef.current();
+            return;
+          }
+          if (
+            (code === 'KeyE' || code === 'Enter' || code === 'Space' || isActionPressed(e, 'interact', keybindings)) &&
+            !latestStateRef.current.chronoWarpActive
+          ) {
+            e.preventDefault();
+            setActiveDialog(null);
+            setCodexOpen(false);
+            setInventoryOpen(false);
+            setQuestsOpen(false);
+            setPowersMenuOpen(false);
           }
         } else if (nearbyPromptRef.current) {
           e.preventDefault();
@@ -5067,6 +5262,9 @@ export function Origin70sIsland({
             isPointWalkableOnIsland(wx, wy, {
               southShortcut: st.southShortcutActive,
               gargantaBridge: st.glitchTrailCleared,
+              froggerCleared:
+                st.allUnlocked ||
+                Boolean(st.progressState.games['frogger']?.memoryUnlocked),
             })
           ) &&
           !isBlockedByExteriorBuilding(wx, wy) &&
@@ -5141,7 +5339,6 @@ export function Origin70sIsland({
     let lastZoneNotified: IslandZoneId | null = null;
     let lastPosSaveTimer = 0;
     let miniMapSyncTimer = 0;
-    let stepAudioTimer = 0;
     let lastTileSteppedId = '';
     let prevPromptId = '';
     let surfSprayTimer = 0;
@@ -5168,6 +5365,8 @@ export function Origin70sIsland({
       const dt = Math.min(0.05, (now - prevTime) / 1000);
       prevTime = now;
       elapsed += dt;
+      const walkStartX = player.x;
+      const walkStartY = player.y;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, vw, vh);
 
@@ -5299,6 +5498,9 @@ export function Origin70sIsland({
                 isPointWalkableOnIsland(player.x, player.y, {
                   southShortcut: st.southShortcutActive,
                   gargantaBridge: st.glitchTrailCleared,
+                  froggerCleared:
+                    st.allUnlocked ||
+                    Boolean(st.progressState.games['frogger']?.memoryUnlocked),
                 })
               ) &&
               !isBlockedByExteriorBuilding(player.x, player.y) &&
@@ -5356,8 +5558,9 @@ export function Origin70sIsland({
             player.y - worldViewHeight() * 0.5
           )
         );
-        camera.x += (sdTargetCamX - camera.x) * Math.min(1, dt * 7);
-        camera.y += (sdTargetCamY - camera.y) * Math.min(1, dt * 7);
+        const sdFollow = cameraFollowFactor(dt, 7);
+        camera.x += (sdTargetCamX - camera.x) * sdFollow;
+        camera.y += (sdTargetCamY - camera.y) * sdFollow;
         if (sp >= 1) {
           surfDisembarkRef.current = null;
           player.walking = false;
@@ -5452,8 +5655,9 @@ export function Origin70sIsland({
               player.y - worldViewHeight() * 0.5
             )
           );
-          camera.x += (rideCamX - camera.x) * Math.min(1, dt * 7);
-          camera.y += (rideCamY - camera.y) * Math.min(1, dt * 7);
+          const rideFollow = cameraFollowFactor(dt, 7);
+          camera.x += (rideCamX - camera.x) * rideFollow;
+          camera.y += (rideCamY - camera.y) * rideFollow;
 
           if (p >= 0.74) {
             // La tabla frena en la orilla y se retira mientras el personaje
@@ -5572,9 +5776,15 @@ export function Origin70sIsland({
         } else setDashCooldown(0);
         const hoverboarding = curArea === 'exterior-70s' && vehicleFlightRef.current.type === 'hoverboard';
         const sprinting = Boolean(keys['ShiftLeft'] || keys['ShiftRight'] || vIn.sprint || dash.remaining > 0 || hoverboarding);
-        const baseSpeed = curArea === 'exterior-70s' ? 215 : 190;
-        const sprintSpeed = curArea === 'exterior-70s' ? 315 : 265;
-        const speed = dash.remaining > 0 ? 720 : hoverboarding ? 285 : sprinting ? sprintSpeed : baseSpeed;
+        // Misma velocidad base que Isla Natal y el resto de las islas; la tabla
+        // y el impulso orbital conservan sus velocidades propias de mecánica.
+        const speed = dash.remaining > 0
+          ? 720
+          : hoverboarding
+            ? 285
+            : sprinting
+              ? PIXEL_SPRINT_SPEED
+              : PIXEL_WALK_SPEED;
         if (dash.remaining > 0) {
           dx = dash.dx;
           dy = dash.dy;
@@ -5591,12 +5801,6 @@ export function Origin70sIsland({
             player.facingDir = dy >= 0 ? 'down' : 'up';
           }
 
-          stepAudioTimer += dt * (player.sprinting ? 1.45 : 1);
-          if (stepAudioTimer >= 0.34) {
-            stepAudioTimer = 0;
-            retroAudio.stepTile();
-          }
-
           const stepDistance = Math.min(dash.remaining > 0 ? 8 : speed * dt, dash.remaining > 0 ? dash.remaining : speed * dt);
           const nextX = player.x + dx * stepDistance;
           const nextY = player.y + dy * stepDistance;
@@ -5605,6 +5809,9 @@ export function Origin70sIsland({
             const walkOpts = {
               southShortcut: st.southShortcutActive,
               gargantaBridge: st.glitchTrailCleared,
+              froggerCleared:
+                st.allUnlocked ||
+                Boolean(st.progressState.games['frogger']?.memoryUnlocked),
             };
             const volcanicPassageOpen = st.allUnlocked || st.progressState.island70s.talkedNpcIds.includes(VOLCANIC_GUARD_ID);
             const canXY =
@@ -5695,6 +5902,19 @@ export function Origin70sIsland({
         if (t >= 1) playerPosBridgeRef.current.interactAnim = 0.28;
       }
 
+      // Movimiento compartido con Isla Natal: la animación y las pisadas siguen
+      // la distancia real recorrida; empujar contra una pared no anima en el lugar.
+      const walkMoved = Math.hypot(player.x - walkStartX, player.y - walkStartY);
+      if (player.walking && walkMoved > 0.01) {
+        const footfalls = advancePixelWalkCycle(walkCycle, walkMoved);
+        if (footfalls > 0) retroAudio.stepTile(pixelStepParity(walkCycle) === 0 ? 1 : 2);
+        player.walkFrameIndex = pixelWalkFrame(walkCycle);
+      } else {
+        resetPixelWalkCycle(walkCycle);
+        player.walkFrameIndex = 0;
+        if (player.walking) player.walking = false;
+      }
+
       playerPosBridgeRef.current.x = player.x;
       playerPosBridgeRef.current.y = player.y;
       playerPosBridgeRef.current.facingDir = player.facingDir;
@@ -5775,6 +5995,9 @@ export function Origin70sIsland({
         const activeRect = isPointWalkableOnIsland(player.x, player.y, {
           southShortcut: st.southShortcutActive,
           gargantaBridge: st.glitchTrailCleared,
+          froggerCleared:
+            st.allUnlocked ||
+            Boolean(st.progressState.games['frogger']?.memoryUnlocked),
         });
 
         if (activeRect && activeRect.zoneId !== lastZoneNotified) {
@@ -6374,6 +6597,9 @@ export function Origin70sIsland({
               isPointWalkableOnIsland(player.x, player.y, {
                 southShortcut: st.southShortcutActive,
                 gargantaBridge: st.glitchTrailCleared,
+                froggerCleared:
+                  st.allUnlocked ||
+                  Boolean(st.progressState.games['frogger']?.memoryUnlocked),
               })
             ) &&
             !isBlockedByExteriorBuilding(player.x, player.y) &&
@@ -6403,8 +6629,9 @@ export function Origin70sIsland({
             player.y - worldViewHeight() * 0.5
           )
         );
-        camera.x += (targetCamX - camera.x) * Math.min(1, dt * 6.5);
-        camera.y += (targetCamY - camera.y) * Math.min(1, dt * 6.5);
+        const cameraFollow = cameraFollowFactor(dt);
+        camera.x += (targetCamX - camera.x) * cameraFollow;
+        camera.y += (targetCamY - camera.y) * cameraFollow;
 
         if (
           st.progressState.rpg.dylanEscortActive &&
@@ -7765,7 +7992,7 @@ export function Origin70sIsland({
                 }}
                 className="dialogue-action px-4 py-1.5 font-mono font-bold text-xs uppercase tracking-wider cursor-pointer whitespace-nowrap shrink-0"
               >
-                {dialogueVisibleChars < dialogueFullText.length ? 'REVELAR TEXTO [ENTER]' : 'CONTINUAR [ENTER]'}
+                {dialogueVisibleChars < dialogueFullText.length ? 'REVELAR TEXTO · [E/ESPACIO]' : 'CONTINUAR · [E/ESPACIO]'}
               </button>
             </div>
           </div>

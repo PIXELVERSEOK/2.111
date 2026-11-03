@@ -1000,6 +1000,19 @@ export const RPG_ITEMS: Record<string, RpgItemSpec> = {
     usageHint: 'Consúltala desde el inventario para recordar la combinación del cofre (287).',
     usableAction: 'inspect',
   },
+  'item-cosecha-natal': {
+    id: 'item-cosecha-natal',
+    name: 'Cosecha de Isla Natal',
+    category: 'objeto',
+    categoryLabel: 'RECURSO DE ABASTECIMIENTO',
+    accentHex: '#86efac',
+    shortCode: 'COS-NAT',
+    description:
+      'Cesta de hortalizas cultivadas en la huerta familiar de Isla Natal. Recurso reservado para abastecer a una comunidad de otra isla cuando llegue la misión de recolección.',
+    usageHint:
+      'Se entregará a una comunidad necesitada en una isla futura. La huerta todavía está en crecimiento.',
+    usableAction: 'inspect',
+  },
 };
 
 /* ============================================================================
@@ -1167,7 +1180,12 @@ export const RPG_QUESTS: RpgQuestSpec[] = [
           all ||
           (st.rpg.inventoryItems.includes('item-transistores-germanio-lago') &&
             st.rpg.inventoryItems.includes('item-componentes-estano')) ||
-          st.island70s.narrativeEvents.includes('origen-transistores-lago-entregados'),
+          // Los materiales se consumen al entregarlos: si Dylan ya recibió el
+          // estaño o Kertz el germanio, el objetivo debe seguir marcado como
+          // cumplido y no quedar permanentemente incompleto.
+          st.island70s.narrativeEvents.includes('origen-transistores-lago-entregados') ||
+          st.island70s.narrativeEvents.includes('origen-soldador-entregado') ||
+          st.island70s.narrativeEvents.includes('origen-germanio-entregado'),
       },
       {
         label: 'Entregar los componentes a Dylan y recibir el soldador de estaño',

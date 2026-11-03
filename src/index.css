@@ -1283,6 +1283,75 @@ button:focus-visible {
   box-shadow: 0 0 18px rgba(253, 224, 71, 0.22);
 }
 
+/* «Siguiente escena»: siempre visible mientras quede un bloque pendiente. */
+.cr-next,
+.bedroom-next {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px 0 15px;
+  border: 1px solid rgba(253, 224, 71, 0.45);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(10, 21, 40, 0.9), rgba(4, 9, 20, 0.94));
+  color: #fde047;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+  animation: crNextIn 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.cr-next svg,
+.bedroom-next svg {
+  width: 14px;
+  height: 14px;
+}
+
+.cr-next:hover,
+.cr-next:focus-visible,
+.bedroom-next:hover,
+.bedroom-next:focus-visible {
+  outline: none;
+  border-color: rgba(253, 224, 71, 0.9);
+  background: linear-gradient(180deg, rgba(22, 41, 68, 0.94), rgba(7, 15, 28, 0.96));
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55), 0 0 22px rgba(253, 224, 71, 0.2);
+  transform: translateY(-1px);
+}
+
+.cr-next:active,
+.bedroom-next:active {
+  transform: translateY(0);
+}
+
+.cr-next {
+  position: absolute;
+  z-index: 6;
+  top: clamp(16px, 4vh, 42px);
+  right: calc(50% - min(50vw, 66.6667vh) + clamp(18px, 2.8vw, 44px));
+}
+
+.bedroom-next {
+  position: absolute;
+  z-index: 9;
+  top: calc(clamp(14px, 3.2vh, 30px) + 42px);
+  right: clamp(14px, 2.6vw, 34px);
+}
+
+@keyframes crNextIn {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
 .cr-pause {
   position: absolute;
   inset: 0;

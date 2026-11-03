@@ -62,6 +62,7 @@ import {
   ORIGEN_SECURITY_RUINS,
   ORIGEN_SECTOR_GATE,
 } from './island70sData';
+import { StaticChunkCache } from './staticChunkCache';
 
 export interface IslandStar {
   nx: number;
@@ -1335,6 +1336,7 @@ export function drawPixelAvatar4Dir(
     lanternRadiusScale?: number;
     interactAnim?: number;
     appearance?: AvatarAppearance;
+    walkFrameIndex?: number;
   }
 ): void {
   renderPixelVxAce4Dir(ctx, ax, ay, facingDir, walking, sprinting, t, skin, hair, shirt, opts);
@@ -3595,6 +3597,78 @@ function drawGbcWalkableSurfaceTile(
 }
 
 /**
+ * CACHÉ DE SUELO ESTÁTICO POR SECTORES
+ * El terreno caminable de la isla (césped, arena, piedra, madera…) no cambia
+ * entre fotogramas. Se hornea una vez por sector de 256 px y después se
+ * recompone con un `drawImage` por sector visible. Las superficies con pulso
+ * propio (basalto volcánico con lava, trazas del bosque) quedan fuera y se
+ * siguen dibujando en vivo para conservar su animación.
+ *
+ * El suelo se reparte en dos capas alrededor de esas superficies animadas para
+ * no alterar el orden de dibujado original: la primera baldosa del Bastión se
+ * solapa con la piedra de la Garganta (que debe quedar debajo) y con el puente
+ * de lava (que debe quedar encima). Con una sola capa una de las dos relaciones
+ * se invertiría y aparecerían costuras de 4 px en el borde de las baldosas.
+ */
+const firstAnimatedSurfaceIndex = Math.max(
+  0,
+  ISLAND_WALKABLE_RECTS.findIndex(
+    (r) => r.surface === 'fortress' || r.surface === 'circuit'
+  )
+);
+const originSurfaceChunkOptions = {
+  chunkSize: 256,
+  margin: 8,
+  maxChunks: 40,
+  preloadChunks: 1,
+  bakeBudgetMs: 2,
+};
+const originSurfaceUnderChunks = new StaticChunkCache(originSurfaceChunkOptions);
+const originSurfaceOverChunks = new StaticChunkCache(originSurfaceChunkOptions);
+
+function paintOriginStaticSurfaceChunk(
+  ctx: CanvasRenderingContext2D,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  southShortcutActive: boolean,
+  glitchTrailCleared: boolean,
+  fromIndex: number,
+  toIndex: number
+): boolean {
+  let painted = false;
+  for (let i = fromIndex; i < toIndex; i++) {
+    const r = ISLAND_WALKABLE_RECTS[i];
+    if (r.surface === 'fortress' || r.surface === 'circuit') continue;
+    if (r.requiresCondition === 'south-shortcut' && !southShortcutActive) continue;
+    if (r.requiresCondition === 'garganta-bridge' && !glitchTrailCleared) continue;
+    if (r.x >= maxX || r.y >= maxY || r.x + r.w <= minX || r.y + r.h <= minY) continue;
+
+    const tx0 = Math.max(Math.floor(minX / CELL), Math.floor(r.x / CELL));
+    const tx1 = Math.min(Math.ceil(maxX / CELL) - 1, Math.ceil((r.x + r.w) / CELL) - 1);
+    const ty0 = Math.max(Math.floor(minY / CELL), Math.floor(r.y / CELL));
+    const ty1 = Math.min(Math.ceil(maxY / CELL) - 1, Math.ceil((r.y + r.h) / CELL) - 1);
+    for (let ty = ty0; ty <= ty1; ty++) {
+      for (let tx = tx0; tx <= tx1; tx++) {
+        drawGbcWalkableSurfaceTile(
+          ctx,
+          tx,
+          ty,
+          tx * CELL,
+          ty * CELL,
+          r.surface,
+          r.zoneId,
+          0
+        );
+        painted = true;
+      }
+    }
+  }
+  return painted;
+}
+
+/**
  * SENDEROS ORGÁNICOS DE TIERRA APISONADA Y ESCALINATAS TALLADAS ESTILO GBA RPG
  * - Bordes orgánicos irregulares con flequillos de hierba que muerden la tierra.
  * - Degradado natural de tierra batida: borde de tránsito oscuro, cuerpo de arcilla y centro arenoso claro.
@@ -5678,6 +5752,8 @@ export interface IslandRenderFrameParams {
     walking: boolean;
     sprinting?: boolean;
     interactAnim?: number;
+    /** Tiempo de marcha por distancia real (sistema compartido de movimiento). */
+    walkFrameIndex?: number;
   };
   flight: {
     type:
@@ -6559,6 +6635,354 @@ function drawOrigenCalaDressing(
     ctx.fillRect(300 + i * 78, 2034 + (i % 3) * 22, 5, 1);
   }
 }
+
+/** Charcones de marea fijos de la cala (solo decorativos, sin colisión). */
+const ORIGEN_CALA_TIDE_POOLS = [
+  { x: 342, y: 2124, rx: 13, ry: 5 },
+  { x: 622, y: 2012, rx: 10, ry: 4 },
+  { x: 792, y: 2140, rx: 11, ry: 5 },
+] as const;
+
+/**
+ * Frente marino de la cala: sustituye el marco recto de arena por una orilla
+ * festoneada con bajío, arena húmeda, resaca y espuma. Se dibuja después de
+ * las baldosas y antes del muelle, así que el recorrido y las colisiones
+ * siguen intactos.
+ */
+function drawOrigenCalaSeafront(
+  ctx: CanvasRenderingContext2D,
+  elapsed: number,
+  reducedMotion: boolean,
+  camX: number,
+  camY: number,
+  vw: number,
+  vh: number
+): void {
+  const cove = ISLAND_WALKABLE_RECTS.find((r) => r.id === 'costa-cove');
+  if (!cove) return;
+  const x0 = cove.x;
+  const y0 = cove.y;
+  const x1 = cove.x + cove.w;
+  const y1 = cove.y + cove.h;
+  if (!isWorldBoxVisible(x0 - 30, y0 - 6, cove.w + 60, cove.h + 46, camX, camY, vw, vh)) {
+    return;
+  }
+  const anim = reducedMotion ? 0 : elapsed;
+  const wave = (wx: number, freq: number, phase = 0) =>
+    Math.sin(wx * freq + phase + anim * 0.22) * 2 + Math.sin(wx * freq * 0.41 + 1.3) * 3;
+
+  // 1. Bajío: tres franjas translúcidas con borde exterior ondulado.
+  for (let wx = x0 - 30; wx < x1 + 30; wx += 3) {
+    const th = hashTile(Math.floor(wx / 3), 17);
+    const wob = wave(wx, 0.03);
+    const inner = 4 + (th % 3);
+    const mid = 12 + (th % 5) + wob;
+    const outer = 24 + (th % 7) + wob * 1.4;
+    ctx.fillStyle = 'rgba(25, 110, 145, 0.22)';
+    ctx.fillRect(wx, y1 + mid, 3, Math.max(2, outer - mid));
+    ctx.fillStyle = 'rgba(45, 180, 210, 0.3)';
+    ctx.fillRect(wx, y1 + inner, 3, Math.max(2, mid - inner));
+    ctx.fillStyle = 'rgba(94, 216, 222, 0.44)';
+    ctx.fillRect(wx, y1, 3, inner);
+  }
+  for (let wy = y0; wy < y1; wy += 3) {
+    const thW = hashTile(41, Math.floor(wy / 3));
+    const thE = hashTile(67, Math.floor(wy / 3));
+    const wobW = wave(wy, 0.033, 0.9);
+    const wobE = wave(wy, 0.029, 2.2);
+    const innerW = 4 + (thW % 3);
+    const midW = 11 + (thW % 5) + wobW;
+    const outerW = 21 + (thW % 7) + wobW * 1.3;
+    const innerE = 4 + (thE % 3);
+    const midE = 11 + (thE % 5) + wobE;
+    const outerE = 21 + (thE % 7) + wobE * 1.3;
+    ctx.fillStyle = 'rgba(25, 110, 145, 0.22)';
+    ctx.fillRect(x0 - outerW, wy, Math.max(2, outerW - midW), 3);
+    ctx.fillRect(x1 + midE, wy, Math.max(2, outerE - midE), 3);
+    ctx.fillStyle = 'rgba(45, 180, 210, 0.3)';
+    ctx.fillRect(x0 - midW, wy, Math.max(2, midW - innerW), 3);
+    ctx.fillRect(x1 + innerE, wy, Math.max(2, midE - innerE), 3);
+    ctx.fillStyle = 'rgba(94, 216, 222, 0.44)';
+    ctx.fillRect(x0 - innerW, wy, innerW, 3);
+    ctx.fillRect(x1, wy, innerE, 3);
+  }
+
+  // Línea de agua: borde oscuro festoneado por dentro de la arena.
+  for (let wx = x0; wx < x1; wx += 2) {
+    const th = hashTile(Math.floor(wx / 2), 83);
+    const reach = 2 + (th % 3) + Math.round(wave(wx, 0.05, 0.4));
+    const edge = Math.max(2, reach + 2);
+    ctx.fillStyle = 'rgba(84, 62, 34, 0.34)';
+    ctx.fillRect(wx, y1 - edge, 2, edge);
+    ctx.fillStyle = 'rgba(58, 44, 26, 0.4)';
+    ctx.fillRect(wx, y1 - Math.max(1, reach - 1), 2, Math.max(1, reach - 1));
+  }
+  for (let wy = y0 + 30; wy < y1; wy += 2) {
+    const thW = hashTile(211, Math.floor(wy / 2));
+    const thE = hashTile(229, Math.floor(wy / 2));
+    const reachW = Math.max(2, 2 + (thW % 3) + Math.round(wave(wy, 0.05, 1.1)) + 2);
+    const reachE = Math.max(2, 2 + (thE % 3) + Math.round(wave(wy, 0.047, 2.9)) + 2);
+    ctx.fillStyle = 'rgba(84, 62, 34, 0.34)';
+    ctx.fillRect(x0, wy, reachW, 2);
+    ctx.fillRect(x1 - reachE, wy, reachE, 2);
+    ctx.fillStyle = 'rgba(58, 44, 26, 0.4)';
+    ctx.fillRect(x0, wy, Math.max(1, reachW - 3), 2);
+    ctx.fillRect(x1 - Math.max(1, reachE - 3), wy, Math.max(1, reachE - 3), 2);
+  }
+  for (let wx = x0 + 1; wx < x1 - 1; wx += 10) {
+    const th = hashTile(Math.floor(wx / 10), 71);
+    const lift = Math.round(Math.sin(anim * 1.9 + wx * 0.05) * 1);
+    ctx.fillStyle = th % 3 === 0 ? 'rgba(233, 255, 250, 0.5)' : 'rgba(255, 255, 255, 0.7)';
+    ctx.fillRect(wx, y1 - 1 + lift, 5 + (th % 4), 1);
+  }
+  for (let wy = y0 + 30; wy < y1 - 3; wy += 10) {
+    const thW = hashTile(181, Math.floor(wy / 10));
+    const thE = hashTile(193, Math.floor(wy / 10));
+    const lift = Math.round(Math.sin(anim * 1.9 + wy * 0.05) * 1);
+    if (thW % 3 !== 0) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.fillRect(x0 - 1 + lift, wy, 1, 4 + (thW % 3));
+    }
+    if (thE % 3 !== 0) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.fillRect(x1 - lift, wy, 1, 4 + (thE % 3));
+    }
+  }
+
+  // 2. Arena húmeda dentro del borde sur, oeste y este.
+  for (let wx = x0; wx < x1; wx += 2) {
+    const th = hashTile(Math.floor(wx / 2), 91);
+    const wet = 8 + (th % 5) + Math.round(wave(wx, 0.024, 0.7));
+    ctx.fillStyle = 'rgba(171, 137, 66, 0.5)';
+    ctx.fillRect(wx, y1 - wet, 2, wet);
+    ctx.fillStyle = 'rgba(122, 94, 48, 0.42)';
+    ctx.fillRect(wx, y1 - 5, 2, 5);
+    ctx.fillStyle = 'rgba(96, 74, 40, 0.34)';
+    ctx.fillRect(wx, y1 - 2, 2, 2);
+    if (th % 13 === 0) {
+      ctx.fillStyle = 'rgba(255, 246, 214, 0.42)';
+      ctx.fillRect(wx, y1 - wet + 2, 2, 1);
+    }
+  }
+  for (let wy = y0 + 24; wy < y1 - 8; wy += 2) {
+    const thW = hashTile(113, Math.floor(wy / 2));
+    const thE = hashTile(131, Math.floor(wy / 2));
+    const wetW = 7 + (thW % 5) + Math.round(wave(wy, 0.026, 1.4));
+    const wetE = 7 + (thE % 5) + Math.round(wave(wy, 0.022, 2.6));
+    ctx.fillStyle = 'rgba(171, 137, 66, 0.48)';
+    ctx.fillRect(x0, wy, wetW, 2);
+    ctx.fillRect(x1 - wetE, wy, wetE, 2);
+    ctx.fillStyle = 'rgba(122, 94, 48, 0.4)';
+    ctx.fillRect(x0, wy, 4, 2);
+    ctx.fillRect(x1 - 4, wy, 4, 2);
+    if (thW % 11 === 0) {
+      ctx.fillStyle = 'rgba(255, 246, 214, 0.36)';
+      ctx.fillRect(x0 + wetW - 3, wy, 2, 1);
+    }
+    if (thE % 11 === 0) {
+      ctx.fillStyle = 'rgba(255, 246, 214, 0.36)';
+      ctx.fillRect(x1 - wetE + 1, wy, 2, 1);
+    }
+  }
+
+  // 3. Resaca de marea: algas, conchas y palitos con claros irregulares.
+  for (let wx = x0 + 14; wx < x1 - 14; wx += 21) {
+    const th = hashTile(Math.floor(wx / 21), 53);
+    if (th % 5 < 2) continue;
+    const dy = 16 + (th % 12) + Math.round(Math.sin(wx * 0.014) * 4);
+    const wy = y1 - dy;
+    ctx.fillStyle = th % 2 === 0 ? '#3f5f2c' : '#587a33';
+    ctx.fillRect(wx, wy, 3 + (th % 4), 1);
+    ctx.fillRect(wx + 1, wy - 1, 2, 1);
+    if (th % 6 === 0) {
+      ctx.fillStyle = '#7d8f46';
+      ctx.fillRect(wx + 4, wy + 1, 2, 1);
+    }
+    if (th % 7 === 0) {
+      ctx.fillStyle = '#f4e6c6';
+      ctx.fillRect(wx + 8, wy - 1, 2, 1);
+      ctx.fillStyle = '#d9b58e';
+      ctx.fillRect(wx + 9, wy, 1, 1);
+    }
+    if (th % 9 === 0) {
+      ctx.fillStyle = '#8a8272';
+      ctx.fillRect(wx + 12, wy + 1, 1, 1);
+    }
+    if (th % 11 === 0) {
+      ctx.fillStyle = '#6b5638';
+      ctx.fillRect(wx + 5, wy - 2, 5, 1);
+    }
+  }
+
+  // 4. Charcones de marea: agua quieta, reborde húmedo y destellos.
+  const pools = ORIGEN_CALA_TIDE_POOLS;
+  for (let p = 0; p < pools.length; p += 1) {
+    const pool = pools[p];
+    if (pool.x + pool.rx < x0 || pool.x - pool.rx > x1 || pool.y + pool.ry < y0 || pool.y - pool.ry > y1) continue;
+    // Reborde de arena mojada: dos anillos irregulares alrededor del agua.
+    for (let ring = 0; ring < 2; ring += 1) {
+      const grow = ring === 0 ? 3 : 1;
+      ctx.fillStyle = ring === 0 ? 'rgba(139, 106, 58, 0.42)' : 'rgba(108, 82, 44, 0.4)';
+      for (let dy = -pool.ry - grow; dy <= pool.ry + grow; dy += 1) {
+        const nrm = dy / (pool.ry + grow + 0.5);
+        const half = Math.floor((pool.rx + grow) * Math.sqrt(Math.max(0, 1 - nrm * nrm)));
+        if (half < 2) continue;
+        const jg = (hashTile(p * 37 + dy, 341 + ring) % 3) - 1;
+        ctx.fillRect(pool.x - half + jg, pool.y + dy, half * 2 - 1, 1);
+      }
+    }
+    // Agua somera con reflejo de cielo y fondo oscurecido.
+    for (let dy = -pool.ry; dy <= pool.ry; dy += 1) {
+      const nrm = dy / (pool.ry + 1);
+      const half = Math.floor(pool.rx * Math.sqrt(Math.max(0, 1 - nrm * nrm)));
+      if (half < 2) continue;
+      const wob = (hashTile(pool.x + dy, p + 5) % 3) - 1;
+      ctx.fillStyle = 'rgba(48, 112, 128, 0.58)';
+      ctx.fillRect(pool.x - half + wob, pool.y + dy, half * 2 - 1, 1);
+      if (dy <= 0) {
+        ctx.fillStyle = 'rgba(126, 202, 202, 0.3)';
+        ctx.fillRect(pool.x - half + 3, pool.y + dy, Math.max(2, half - 2), 1);
+      }
+      if (dy === pool.ry) {
+        ctx.fillStyle = 'rgba(34, 84, 100, 0.45)';
+        ctx.fillRect(pool.x - half + 1, pool.y + dy, half * 2 - 3, 1);
+      }
+      if (dy === 0) {
+        ctx.fillStyle = 'rgba(176, 226, 222, 0.28)';
+        ctx.fillRect(pool.x - half + 2, pool.y, Math.max(2, half - 1), 1);
+      }
+    }
+    // Islote de arena y hierba en el borde.
+    ctx.fillStyle = 'rgba(196, 158, 92, 0.9)';
+    ctx.fillRect(pool.x - pool.rx + 4, pool.y - 1, 3, 1);
+    ctx.fillStyle = '#6d8445';
+    ctx.fillRect(pool.x - pool.rx + 5, pool.y - 3, 1, 2);
+    // Espuma de borde y destellos.
+    ctx.fillStyle = 'rgba(232, 250, 244, 0.4)';
+    ctx.fillRect(pool.x - pool.rx + 2, pool.y - pool.ry - 1, Math.max(2, pool.rx - 3), 1);
+    ctx.fillStyle = 'rgba(232, 250, 244, 0.3)';
+    ctx.fillRect(pool.x + 2, pool.y + pool.ry, 3, 1);
+    const glint = reducedMotion ? 0 : Math.sin(anim * 1.7 + p * 2.3);
+    if (glint > 0.15) {
+      ctx.fillStyle = 'rgba(255, 255, 250, 0.5)';
+      ctx.fillRect(pool.x - 4 + Math.round(glint * 3), pool.y - 1, 5, 1);
+    }
+    if (!reducedMotion && glint < -0.35) {
+      ctx.fillStyle = 'rgba(214, 246, 240, 0.4)';
+      ctx.fillRect(pool.x + 2, pool.y + 2, 3, 1);
+    }
+  }
+
+  // 5. Rizaduras de viento: crestas largas y peinadas sobre la arena seca.
+  for (let wy = y0 + 44, row = 0; wy < y1 - 22; wy += 15, row += 1) {
+    const drift = Math.round(Math.sin(wy * 0.017) * 6);
+    for (let wx = x0 + 10 + (row % 2) * 14; wx < x1 - 10; wx += 31) {
+      const th = hashTile(Math.floor(wx / 31), Math.floor(wy));
+      if (th % 5 === 0) continue;
+      const len = 10 + (th % 16);
+      const yy = wy + (th % 4) + Math.round(Math.sin(wx * 0.02 + wy * 0.045) * 2);
+      const xx = wx + drift * ((th % 3) - 1);
+      ctx.fillStyle = 'rgba(158, 118, 60, 0.16)';
+      ctx.fillRect(xx, yy + 1, len, 1);
+      ctx.fillStyle = 'rgba(255, 246, 214, 0.26)';
+      ctx.fillRect(xx + 1, yy, Math.max(4, len - 3), 1);
+      if (th % 3 === 0) {
+        ctx.fillStyle = 'rgba(255, 250, 226, 0.2)';
+        ctx.fillRect(xx + 3, yy - 2, 4 + (th % 5), 1);
+      }
+    }
+  }
+
+  // 6. Conchas sueltas, guijarros y algas secas dispersos por la arena.
+  for (let i = 0; i < 26; i += 1) {
+    const th = hashTile(i * 29 + 3, 307);
+    const sx = x0 + 24 + (th % Math.max(1, cove.w - 48));
+    const sy = y0 + 50 + ((th * 7) % Math.max(1, cove.h - 90));
+    if (th % 3 === 0) {
+      ctx.fillStyle = 'rgba(90, 72, 46, 0.35)';
+      ctx.fillRect(sx, sy + 1, 3, 1);
+      ctx.fillStyle = '#efe2c4';
+      ctx.fillRect(sx, sy, 2, 1);
+      ctx.fillStyle = '#cfae86';
+      ctx.fillRect(sx + 2, sy + 1, 1, 1);
+    } else if (th % 3 === 1) {
+      ctx.fillStyle = 'rgba(96, 84, 66, 0.8)';
+      ctx.fillRect(sx, sy, 1 + (th % 2), 1);
+      ctx.fillStyle = 'rgba(146, 134, 112, 0.7)';
+      ctx.fillRect(sx + 1, sy, 1, 1);
+    } else {
+      ctx.fillStyle = 'rgba(84, 104, 58, 0.55)';
+      ctx.fillRect(sx, sy, 2, 1);
+      ctx.fillRect(sx + 3, sy + 1, 1, 1);
+    }
+  }
+
+  // 7. Espuma: resaca interior, dos líneas exteriores y burbujas.
+  for (let wx = x0 + 4; wx < x1 - 4; wx += 14) {
+    const th = hashTile(Math.floor(wx / 14), 33);
+    if (th % 4 === 0) continue;
+    const rise = Math.round(Math.sin(anim * 1.7 + wx * 0.035) * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.66)';
+    ctx.fillRect(wx, y1 - 5 + rise, 5 + (th % 5), 1);
+    if (th % 5 === 0) {
+      ctx.fillStyle = 'rgba(224, 255, 252, 0.6)';
+      ctx.fillRect(wx + 2, y1 - 7 + rise, 1, 1);
+    }
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.44)';
+    ctx.fillRect(wx + 5, y1 + 5 + ((th % 3) + rise), 7 + (th % 6), 1);
+    ctx.fillStyle = 'rgba(209, 250, 229, 0.28)';
+    ctx.fillRect(wx + 9, y1 + 11 + (th % 4), 5 + (th % 5), 1);
+  }
+  for (let wy = y0 + 22; wy < y1 - 6; wy += 14) {
+    const thW = hashTile(157, Math.floor(wy / 14));
+    const thE = hashTile(173, Math.floor(wy / 14));
+    if (thW % 4 !== 0) {
+      const shift = Math.round(Math.sin(anim * 1.5 + wy * 0.04) * 2);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.fillRect(x0 - 4 + shift, wy, 1, 5 + (thW % 5));
+      ctx.fillStyle = 'rgba(224, 255, 252, 0.32)';
+      ctx.fillRect(x0 - 9 + shift, wy + 2, 1, 4 + (thE % 4));
+    }
+    if (thE % 4 !== 0) {
+      const shift = Math.round(Math.cos(anim * 1.5 + wy * 0.04) * 2);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.fillRect(x1 + 3 - shift, wy, 1, 5 + (thE % 5));
+      ctx.fillStyle = 'rgba(224, 255, 252, 0.32)';
+      ctx.fillRect(x1 + 8 - shift, wy + 2, 1, 4 + (thW % 4));
+    }
+  }
+
+  // 8. Matas de duna en los extremos y junto a la valla sur.
+  for (let i = 0; i < 16; i += 1) {
+    const th = hashTile(i * 37 + 5, 211);
+    const west = i % 2 === 0;
+    const gx = west ? x0 + 8 + (th % 34) : x1 - 10 - (th % 34);
+    const gy = y0 + 70 + (th % (cove.h - 130));
+    const sway = Math.round(Math.sin(anim * 1.3 + i) * 1);
+    ctx.fillStyle = 'rgba(32, 52, 26, 0.3)';
+    ctx.fillRect(gx - 1, gy + 1, 7, 1);
+    ctx.fillStyle = '#4f6b3a';
+    ctx.fillRect(gx + sway, gy - 4, 1, 5);
+    ctx.fillRect(gx + 2 + sway, gy - 6, 1, 7);
+    ctx.fillRect(gx + 4 + sway, gy - 3, 1, 4);
+    ctx.fillStyle = '#8aa35a';
+    ctx.fillRect(gx + 2 + sway, gy - 6, 1, 2);
+    ctx.fillStyle = '#6d8445';
+    ctx.fillRect(gx + 4 + sway, gy - 3, 1, 2);
+  }
+  for (let i = 0; i < 9; i += 1) {
+    const th = hashTile(i * 53 + 7, 223);
+    const gx = x0 + 46 + (th % (cove.w - 120));
+    const gy = y1 - 22 - (th % 9);
+    const sway = Math.round(Math.sin(anim * 1.4 + i * 1.7) * 1);
+    ctx.fillStyle = '#4f6b3a';
+    ctx.fillRect(gx + sway, gy - 3, 1, 4);
+    ctx.fillRect(gx + 3 + sway, gy - 5, 1, 6);
+    ctx.fillStyle = '#7c8f4d';
+    ctx.fillRect(gx + 3 + sway, gy - 5, 1, 2);
+  }
+}
+
 
 /** Gabinete original del desafío «Cruce de Circuitos» en el bosque. */
 function drawCircuitoAnfibioCabinetWorld(
@@ -7628,6 +8052,9 @@ export function renderIsland70sFrame(params: IslandRenderFrameParams): void {
       const isBeach = r.surface === 'sand';
 
       if (isBeach) {
+        // La cala de llegada tiene su propio frente marino orgánico, pintado
+        // después de las baldosas (drawOrigenCalaSeafront).
+        if (r.id === 'costa-cove') continue;
         // ----------------------------------------------------
         // TRANSICIÓN COSTERA DE PLAYA GBA:
         // Bajío de agua turquesa translúcida + rompiente de espuma animada que lame la arena
@@ -7717,7 +8144,35 @@ export function renderIsland70sFrame(params: IslandRenderFrameParams): void {
   }
 
   // 3. SUPERFICIES NATURALES Y ARQUEOLÓGICAS DE LOS 10 SECTORES
+  // El suelo estático se compone desde la caché por sectores: cada 256 px de
+  // mundo se pinta una sola vez (con un anillo de precarga alrededor de la
+  // cámara) y luego cuesta un `drawImage` por sector visible.
+  const surfaceSignature = `${southShortcutActive ? 1 : 0}:${glitchTrailCleared ? 1 : 0}`;
+  originSurfaceUnderChunks.draw(
+    ctx,
+    camX,
+    camY,
+    vw,
+    vh,
+    surfaceSignature,
+    (chunkCtx, minX, minY, maxX, maxY) =>
+      paintOriginStaticSurfaceChunk(
+        chunkCtx,
+        minX,
+        minY,
+        maxX,
+        maxY,
+        southShortcutActive,
+        glitchTrailCleared,
+        0,
+        firstAnimatedSurfaceIndex
+      )
+  );
+
+  // 3-anim. Superficies que respiran (lava del Bastión y trazas del bosque):
+  // se dibujan en vivo para no congelar su parpadeo.
   for (const r of ISLAND_WALKABLE_RECTS) {
+    if (r.surface !== 'fortress' && r.surface !== 'circuit') continue;
     if (r.requiresCondition === 'south-shortcut' && !southShortcutActive) continue;
     if (r.requiresCondition === 'garganta-bridge' && !glitchTrailCleared) continue;
     if (!isWorldBoxVisible(r.x, r.y, r.w, r.h, camX, camY, vw, vh)) continue;
@@ -7743,8 +8198,34 @@ export function renderIsland70sFrame(params: IslandRenderFrameParams): void {
     }
   }
 
+  // 3-post. Baldosas estáticas que en el orden original iban después del
+  // Bastión (puente de lava, santuario de la Cumbre, playa del puerto…).
+  originSurfaceOverChunks.draw(
+    ctx,
+    camX,
+    camY,
+    vw,
+    vh,
+    surfaceSignature,
+    (chunkCtx, minX, minY, maxX, maxY) =>
+      paintOriginStaticSurfaceChunk(
+        chunkCtx,
+        minX,
+        minY,
+        maxX,
+        maxY,
+        southShortcutActive,
+        glitchTrailCleared,
+        firstAnimatedSurfaceIndex,
+        ISLAND_WALKABLE_RECTS.length
+      )
+  );
+
   // 3A. LAVADO DE SUELO POR SECTOR: luz, sombra y textura continuas.
   drawOriginGroundDressing(ctx, camX, camY, vw, vh, southShortcutActive, glitchTrailCleared);
+
+  // 3A-1. FRENTE MARINO DE LA CALA: orilla festoneada, resaca y espuma.
+  drawOrigenCalaSeafront(ctx, elapsed, reducedMotion, camX, camY, vw, vh);
 
   // 3A-0. LAGO DEL BOSQUE DE LAS SEÑALES (corta el paso directo a la otra orilla)
   const anfibioCleared = allUnlocked || Boolean(progressState.games['frogger']?.memoryUnlocked);
@@ -9385,6 +9866,7 @@ export function renderIsland70sFrame(params: IslandRenderFrameParams): void {
               : 1,
             interactAnim: player.interactAnim,
             appearance,
+            walkFrameIndex: player.walkFrameIndex,
           }
         ),
     });

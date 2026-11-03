@@ -48,6 +48,23 @@ export const BEDROOM_TIMELINE = {
 
 export const BEDROOM_DIALOGUE_LINE = '¿Qué fue eso...?';
 
+/**
+ * Bloques narrativos del prólogo para el botón «Siguiente escena».
+ * Cada salto cae sobre un cambio real de puesta en escena (relámpago,
+ * plano de la ventana, incorporación, silueta, escritorio, diálogo) y el
+ * último entrega el control al jugador.
+ */
+export const BEDROOM_SCENE_CUES: number[] = [
+  BEDROOM_TIMELINE.startle,
+  BEDROOM_TIMELINE.windowShot,
+  BEDROOM_TIMELINE.blanketOff,
+  BEDROOM_TIMELINE.standStart,
+  BEDROOM_TIMELINE.flashSilhouette,
+  BEDROOM_TIMELINE.deskFocus,
+  BEDROOM_TIMELINE.dialogueStart,
+  BEDROOM_TIMELINE.handoff,
+];
+
 /* =========================================================
    FONDOS DE PANTALLA COMPLETA Y CÁMARA
    ========================================================= */

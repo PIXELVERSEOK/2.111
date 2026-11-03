@@ -128,7 +128,15 @@ interface Ring {
   radius: number;
 }
 
-function TypewriterText({ text, speed = 44 }: { text: string; speed?: number }) {
+function TypewriterText({
+  text,
+  speed = 44,
+  revealAll = false,
+}: {
+  text: string;
+  speed?: number;
+  revealAll?: boolean;
+}) {
   const [count, setCount] = useState(0);
   useEffect(() => {
     setCount(0);
@@ -144,10 +152,17 @@ function TypewriterText({ text, speed = 44 }: { text: string; speed?: number }) 
     }, speed);
     return () => window.clearInterval(id);
   }, [text, speed]);
+
+  // E/Espacio completan la frase en curso sin esperar al efecto de tipeo.
+  useEffect(() => {
+    if (revealAll) setCount(text.length);
+  }, [revealAll, text]);
+
+  const shown = revealAll ? text.length : count;
   return (
     <span>
-      {text.slice(0, count)}
-      {count < text.length && <span className="bedroom-caret" aria-hidden="true" />}
+      {text.slice(0, shown)}
+      {shown < text.length && <span className="bedroom-caret" aria-hidden="true" />}
     </span>
   );
 }
@@ -216,6 +231,10 @@ export function ComedorStage({
   const nearRef = useRef<string | null>(null);
   const [dialogue, setDialogue] = useState<ComedorDialogue | null>(null);
   const dialogueRef = useRef<ComedorDialogue | null>(null);
+  // Primera pulsación de E/Espacio completa la frase; la siguiente avanza.
+  const [dialogueRevealed, setDialogueRevealed] = useState(false);
+  const dialogueRevealedRef = useRef(false);
+  dialogueRevealedRef.current = dialogueRevealed;
   const [codeOpen, setCodeOpen] = useState(false);
   const codeOpenRef = useRef(false);
   codeOpenRef.current = codeOpen;
@@ -272,6 +291,8 @@ export function ComedorStage({
 
   const openDialogue = useCallback((next: ComedorDialogue | null) => {
     dialogueRef.current = next;
+    dialogueRevealedRef.current = false;
+    setDialogueRevealed(false);
     setDialogue(next);
   }, []);
 
@@ -556,6 +577,18 @@ export function ComedorStage({
   const interactRef = useRef(interact);
   interactRef.current = interact;
 
+  // E/Espacio: completa el texto visible y, en la siguiente pulsación, avanza.
+  const advanceDialogueRef = useRef<() => void>(() => {});
+  advanceDialogueRef.current = () => {
+    if (dialogueRef.current && !dialogueRevealedRef.current) {
+      dialogueRevealedRef.current = true;
+      setDialogueRevealed(true);
+      bedroomStormAudio.tick();
+      return;
+    }
+    interactRef.current();
+  };
+
   const togglePause = useCallback(() => {
     setPaused((value) => {
       const next = !value;
@@ -652,7 +685,7 @@ export function ComedorStage({
       if (codeOpenRef.current) return;
       if (key === 'e' || key === 'enter' || key === ' ') {
         event.preventDefault();
-        interactRef.current();
+        advanceDialogueRef.current();
         return;
       }
       if (key === 'w' || key === 'a' || key === 's' || key === 'd') {
@@ -1139,13 +1172,21 @@ export function ComedorStage({
             <TypewriterText
               text={dialogue.lines[dialogue.index]}
               speed={dialogue.tone === 'storm' ? 52 : 44}
+              revealAll={dialogueRevealed}
             />
           </p>
           <div className="bedroom-dialogue__foot">
             <span>
-              {dialogue.index < dialogue.lines.length - 1 ? 'E · Continuar' : 'E · Cerrar'}
+              {dialogue.index < dialogue.lines.length - 1
+                ? 'E / ESPACIO · Continuar'
+                : 'E / ESPACIO · Cerrar'}
             </span>
-            <button type="button" className="bedroom-dialogue__next" onClick={interact}>
+            <button
+              type="button"
+              className="bedroom-dialogue__next"
+              onClick={interact}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
               {dialogue.index < dialogue.lines.length - 1 ? 'Continuar' : 'Cerrar'}
             </button>
           </div>

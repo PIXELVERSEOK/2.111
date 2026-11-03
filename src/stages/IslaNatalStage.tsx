@@ -16,6 +16,15 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AvatarAppearance } from '../avatar/avatarOptions';
+import {
+  PIXEL_SPRINT_SPEED,
+  PIXEL_WALK_SPEED,
+  advancePixelWalkCycle,
+  createPixelWalkCycle,
+  pixelStepParity,
+  pixelWalkFrame,
+  resetPixelWalkCycle,
+} from '../avatar/pixelMotion';
 import { retroAudio } from '../audio/retroAudio';
 import { isActionPressed, loadKeybindings, type KeybindingsMap } from '../controls/keybindings';
 import {
@@ -39,6 +48,8 @@ import {
   ISLA_NATAL_WORLD_W,
   ISLA_NATAL_ZONES,
   NATAL_CABIN_RADIO_SILENT_DIALOG,
+  NATAL_GARDEN_DIALOG_GROWING,
+  NATAL_GARDEN_DIALOG_READY,
   NATAL_NO_BACKPACK_EXIT_DIALOG,
   NATAL_PORT_NEED_BAR_DIALOG,
   NATAL_PORT_NEED_PONG_DIALOG,
@@ -48,6 +59,7 @@ import {
   isCabinInteriorWalkable,
   isIslaNatalBoxWalkable,
   islaNatalZoneAt,
+  natalGardenStage,
   type IslaNatalDialog,
   type IslaNatalZoneId,
 } from '../island/islaNatalData';
@@ -59,12 +71,14 @@ import {
   type IslaNatalPromptSpec,
 } from '../island/islaNatalRenderer';
 import { IslaNatalVista } from '../island/IslaNatalVista';
+import { CAMERA_FOLLOW_SPEED_ACTION, cameraFollowFactor } from '../island/cameraFollow';
 import type { FacingDirection } from '../rpg/rpgContent';
 import { IslaNatalPongChallenge } from './IslaNatalPongChallenge';
 
 const CAMERA_ZOOM = 1.75;
-const WALK_SPEED = 200;
-const SPRINT_SPEED = 300;
+// Mismo movimiento que el resto de las islas: ver src/avatar/pixelMotion.ts
+const WALK_SPEED = PIXEL_WALK_SPEED;
+const SPRINT_SPEED = PIXEL_SPRINT_SPEED;
 const SIGNAL_DECAY = 0.2;
 const DEPARTURE_DURATION = 4.6;
 /** La nube negra se disipa despacio después de que el enviado desaparece. */
@@ -301,6 +315,10 @@ export function IslaNatalStage({
   const introInsideCabinRef = useRef(introInsideCabin);
   const prologueNightRef = useRef(prologueNight);
   prologueNightRef.current = prologueNight;
+  // La sesión que empezó de noche conserva su fundido de tormenta aunque la
+  // bandera narrativa cambie a mitad de escena. Al volver del comedor la
+  // estación se monta con `prologueNight = false`, así que no hay lluvia.
+  const prologueSessionRef = useRef(prologueNight);
 
   /* -------------------------------------------------------------- */
   /* DIÁLOGO                                                         */
@@ -475,6 +493,13 @@ export function IslaNatalStage({
   );
   const travelerPhaseRef = useRef<TravelerPhase>('none');
   travelerPhaseRef.current = travelerPhase;
+  // E/Espacio adelantan los subtítulos de la radio y la tormenta inicial.
+  const advanceIntroCaptionRef = useRef<() => void>(() => {});
+  advanceIntroCaptionRef.current = () => {
+    if (travelerPhase === 'radio') setTravelerPhase('radio-static');
+    else if (travelerPhase === 'radio-static') setTravelerPhase('storm');
+    else if (travelerPhase === 'storm') setTravelerPhase('exit');
+  };
   const travelerStartRef = useRef(0);
   /** Pixel camina hasta la puerta antes de salir: la transición no es un corte. */
   const exitWalkRef = useRef<{ x: number; y: number } | null>(null);
@@ -1009,8 +1034,11 @@ export function IslaNatalStage({
           grantInventoryRef.current(['item-nota-codigo-cofre']);
           setEnvoyGone(true);
           // El enviado es el interruptor de la tormenta: la nube empieza a
-          // deshacerse y la isla recupera el día de forma progresiva.
+          // deshacerse. La bandera se registra ahora, no al terminar el
+          // fundido, para que la lluvia no reaparezca si el jugador entra a la
+          // casa antes de que la animación complete.
           stormClearStartRef.current = performance.now();
+          markFlag(NATAL_FLAGS.stormCleared);
           stormCinematicRef.current = true;
           setStormCinematic(true);
           retroAudio.timeMachineWarp();
@@ -1127,6 +1155,22 @@ export function IslaNatalStage({
       const poi = ISLA_NATAL_POIS.find((entry) => entry.id === poiId);
       if (!poi) return;
       retroAudio.npcBlip(poi.kind.startsWith('viewpoint') ? 0.85 : 1.05);
+      if (poi.id === 'huerta-central') {
+        // La siembra queda registrada la primera vez que Pixel mira los surcos.
+        // El estado de crecimiento se resuelve con las banderas persistidas y,
+        // por ahora, sólo puede estar en «creciendo».
+        const gardenStage = natalGardenStage(stageRef.current.flagSet);
+        markFlag(NATAL_FLAGS.gardenPlanted);
+        setDialogModal({
+          category: 'HUERTA · CRUCERO DE LOS CUATRO CAMINOS',
+          tone: 'wood',
+          dialog:
+            gardenStage === 'ready'
+              ? NATAL_GARDEN_DIALOG_READY
+              : NATAL_GARDEN_DIALOG_GROWING,
+        });
+        return;
+      }
       const arcane =
         poi.kind === 'window' || poi.kind === 'mailbox' || poi.kind === 'viewpoint-sea';
       setDialogModal({
@@ -1135,7 +1179,7 @@ export function IslaNatalStage({
         dialog: poi.dialog,
       });
     },
-    [enterCabin, openVista, returnToComedor]
+    [enterCabin, markFlag, openVista, returnToComedor]
   );
 
   const handleInteract = useCallback(
@@ -1447,7 +1491,7 @@ export function IslaNatalStage({
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const prologue = prologueNightRef.current;
+    const prologue = prologueSessionRef.current;
 
     const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     let reducedMotion = motionQuery.matches;
@@ -1517,8 +1561,8 @@ export function IslaNatalStage({
     };
     const canWalkAt = (px: number, py: number) =>
       cabinRef.current.inside ? isCabinInteriorWalkable(px, py) : isIslaNatalBoxWalkable(px, py);
-    let stepAudioTimer = 0;
-    let walkTimer = 0;
+    // Fase de marcha compartida: avanza con la distancia real recorrida.
+    const walkCycle = createPixelWalkCycle();
     let prevZoneId: IslaNatalZoneId | null = null;
     let departureFlashFired = false;
     let departureFinished = false;
@@ -1549,7 +1593,21 @@ export function IslaNatalStage({
       if (
         travelerPhaseRef.current === 'radio' ||
         travelerPhaseRef.current === 'radio-static' ||
-        travelerPhaseRef.current === 'storm' ||
+        travelerPhaseRef.current === 'storm'
+      ) {
+        // Los subtítulos de la radio y la tormenta se adelantan con E/Espacio.
+        if (
+          isActionPressed(event, 'interact', keybindings) ||
+          isActionPressed(event, 'confirm', keybindings) ||
+          event.code === 'Enter' ||
+          event.code === 'Space'
+        ) {
+          event.preventDefault();
+          if (!event.repeat) advanceIntroCaptionRef.current();
+        }
+        return;
+      }
+      if (
         travelerPhaseRef.current === 'exit' ||
         travelerPhaseRef.current === 'arrival' ||
         travelerPhaseRef.current === 'descend' ||
@@ -1670,12 +1728,43 @@ export function IslaNatalStage({
     let nightStormT = 0;
     let nightFlash = 0;
     let nextNightStrike = prologue ? 0.9 : Number.POSITIVE_INFINITY;
+    // Calidad adaptativa: sólo afecta efectos secundarios (agua, destellos,
+    // motas, lluvia, velos). Se degrada si el cuadro sostenido se alarga y se
+    // restaura con histéresis cuando el rendimiento vuelve a estabilizarse.
+    let adaptiveQuality: 0 | 1 | 2 = 0;
+    let frameMsEma = 1000 / 60;
+    let qualityPressure = 0;
+    let qualityCalm = 0;
 
     const frame = (now: number) => {
       raf = requestAnimationFrame(frame);
-      const dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
+      const rawDt = Math.max(0, (now - last) / 1000);
+      const dt = Math.min(0.05, rawDt);
       last = now;
+      // Ignorar pestañas ocultas, pausas del depurador o del navegador.
+      if (rawDt > 0 && rawDt < 0.25) {
+        frameMsEma = frameMsEma * 0.9 + rawDt * 1000 * 0.1;
+        if (frameMsEma > 24) {
+          qualityPressure += rawDt;
+          qualityCalm = 0;
+        } else {
+          qualityPressure = Math.max(0, qualityPressure - rawDt * 0.5);
+          if (frameMsEma < 18.5) qualityCalm += rawDt;
+          else qualityCalm = 0;
+        }
+        if (adaptiveQuality < 2 && qualityPressure > 1) {
+          adaptiveQuality = (adaptiveQuality + 1) as 0 | 1 | 2;
+          qualityPressure = 0.15;
+          qualityCalm = 0;
+        } else if (adaptiveQuality > 0 && qualityCalm > 4) {
+          adaptiveQuality = (adaptiveQuality - 1) as 0 | 1 | 2;
+          qualityCalm = 0;
+          qualityPressure = 0;
+        }
+      }
       elapsed += dt;
+      const walkStartX = player.x;
+      const walkStartY = player.y;
 
       const stage = stageRef.current;
       const modalOpen =
@@ -1689,29 +1778,34 @@ export function IslaNatalStage({
       const departure = departureRef.current;
 
       // La tormenta se apaga con una curva suave desde la partida del enviado.
-      let stormFade = 1;
-      if (prologue && stormClearStartRef.current !== null) {
-        const clearK = Math.min(
-          1,
-          Math.max(0, (now - stormClearStartRef.current) / STORM_CLEAR_MS)
-        );
-        const eased = clearK * clearK * (3 - 2 * clearK);
-        stormFade = 1 - eased;
-        if (clearK >= 1 && !stormClearedFiredRef.current) {
-          stormClearedFiredRef.current = true;
-          stormCinematicRef.current = false;
-          setStormCinematic(false);
-          stageRef.current.markFlag(NATAL_FLAGS.stormCleared);
-          retroAudio.zoneChime();
-          stageRef.current.showZoneBanner('pradera-casa', false);
+      // La bandera narrativa ya quedó registrada en ese instante; este fundido
+      // sólo es la salida visual de la sesión que empezó de noche.
+      let stormFade = 0;
+      if (prologue) {
+        if (stormClearStartRef.current !== null) {
+          const clearK = Math.min(
+            1,
+            Math.max(0, (now - stormClearStartRef.current) / STORM_CLEAR_MS)
+          );
+          const eased = clearK * clearK * (3 - 2 * clearK);
+          stormFade = 1 - eased;
+          if (clearK >= 1 && !stormClearedFiredRef.current) {
+            stormClearedFiredRef.current = true;
+            stormCinematicRef.current = false;
+            setStormCinematic(false);
+            stageRef.current.markFlag(NATAL_FLAGS.stormCleared);
+            retroAudio.zoneChime();
+            stageRef.current.showZoneBanner('pradera-casa', false);
+          }
+        } else if (!stage.stormCleared) {
+          stormFade = 1;
         }
       }
-      if (stage.stormCleared) stormFade = 0;
 
       if (prologue) {
         nightStormT += dt;
         nightFlash = Math.max(0, nightFlash - dt * 2.1);
-        if (!modalOpen && !departure && stormFade > 0.2) {
+        if (!modalOpen && !departure && stormFade > 0.2 && !stage.stormCleared) {
           nextNightStrike -= dt;
           if (nextNightStrike <= 0) {
             nextNightStrike = 5.5 + Math.random() * 6.5;
@@ -1772,7 +1866,7 @@ export function IslaNatalStage({
         player.sprinting = false;
 
         // Cámara libre: la tabla surca el mar abierto, sin los límites de la isla
-        const camFollow = Math.min(1, dt * 9);
+        const camFollow = cameraFollowFactor(dt, CAMERA_FOLLOW_SPEED_ACTION);
         camera.x += (player.x - viewW() * 0.5 - camera.x) * camFollow;
         camera.y += (player.y - viewH() * 0.5 - camera.y) * camFollow;
 
@@ -1870,11 +1964,6 @@ export function IslaNatalStage({
             Math.abs(tx) >= Math.abs(ty) ? (tx >= 0 ? 'right' : 'left') : ty >= 0 ? 'down' : 'up';
           player.walking = true;
           player.sprinting = false;
-          stepAudioTimer += dt;
-          if (stepAudioTimer >= 0.3) {
-            stepAudioTimer = 0;
-            retroAudio.stepTile(Math.floor(elapsed * 5) % 2 === 0 ? 1 : 2);
-          }
         } else {
           player.x = target.x;
           player.y = target.y;
@@ -1918,13 +2007,8 @@ export function IslaNatalStage({
             player.facingDir = dy >= 0 ? 'down' : 'up';
           }
 
-          walkTimer += dt;
-          stepAudioTimer += dt * (player.sprinting ? 1.4 : 1);
-          if (stepAudioTimer >= 0.36) {
-            stepAudioTimer = 0;
-            retroAudio.stepTile(Math.floor(walkTimer * 4) % 2 === 0 ? 1 : 2);
-          }
-
+          const prevX = player.x;
+          const prevY = player.y;
           const distance = speed * dt;
           const nextX = player.x + dx * distance;
           const nextY = player.y + dy * distance;
@@ -1942,10 +2026,24 @@ export function IslaNatalStage({
           } else {
             clickTarget = null;
           }
+
+          // La animación de marcha sólo corre si hubo desplazamiento real:
+          // empujar contra una colisión mantiene la pose de reposo.
+          player.walking = player.x !== prevX || player.y !== prevY;
         }
       } else {
         player.walking = false;
         player.sprinting = false;
+      }
+
+      // Movimiento compartido: la animación y el sonido de pasos avanzan sólo
+      // con el desplazamiento real, igual que en el resto de las islas.
+      const walkMoved = Math.hypot(player.x - walkStartX, player.y - walkStartY);
+      if (player.walking && walkMoved > 0.01) {
+        const footfalls = advancePixelWalkCycle(walkCycle, walkMoved);
+        if (footfalls > 0) retroAudio.stepTile(pixelStepParity(walkCycle) === 0 ? 1 : 2);
+      } else {
+        resetPixelWalkCycle(walkCycle);
       }
 
       // Cámara con seguimiento suave (la partida en tabla ya mueve la cámara)
@@ -1960,7 +2058,7 @@ export function IslaNatalStage({
           camera.y = target.y;
           prevZoneId = null;
         } else {
-          const follow = Math.min(1, dt * 6.5);
+          const follow = cameraFollowFactor(dt);
           camera.x += (target.x - camera.x) * follow;
           camera.y += (target.y - camera.y) * follow;
         }
@@ -2133,6 +2231,7 @@ export function IslaNatalStage({
           interactAnim: player.interactAnim,
           ridingPaddle: player.ridingPaddle,
           rideTilt: player.rideTilt,
+          walkFrameIndex: player.walking ? pixelWalkFrame(walkCycle) : 0,
         };
         ctx.save();
         ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
@@ -2202,6 +2301,8 @@ export function IslaNatalStage({
               prologue && stormFade > 0.01
                 ? { t: nightStormT, flash: nightFlash * stormFade, fade: stormFade }
                 : null,
+            gardenStage: natalGardenStage(stage.flagSet),
+            quality: adaptiveQuality,
           });
         }
         ctx.restore();
@@ -2321,6 +2422,9 @@ export function IslaNatalStage({
             <p className="mt-1 font-mono text-xs sm:text-sm leading-relaxed text-slate-100">
               {introCaption.text}
             </p>
+            <p className="mt-2 font-mono text-[9px] tracking-[0.2em] text-slate-400 uppercase">
+              E / ESPACIO · Avanzar
+            </p>
           </div>
         </div>
       )}
@@ -2350,6 +2454,7 @@ export function IslaNatalStage({
               onKeyDown={(event) => {
                 if (event.code === 'Enter' || event.code === 'Space') {
                   event.preventDefault();
+                  event.stopPropagation();
                   advanceDialogueRef.current();
                 }
               }}
@@ -2377,7 +2482,7 @@ export function IslaNatalStage({
             </div>
           </div>
           <p className="comic-hint">
-            CLIC / [E] · {comicIsLast ? 'CONTINUAR' : 'SIGUIENTE'}
+            CLIC / [E] / [ESPACIO] · {comicIsLast ? 'CONTINUAR' : 'SIGUIENTE'}
           </p>
         </div>
       )}
@@ -2435,7 +2540,7 @@ export function IslaNatalStage({
 
             <div className="flex flex-wrap justify-end items-center gap-2 pt-2">
               <span className="mr-auto font-mono text-[10px] text-slate-400 tracking-widest">
-                [ENTER] CONTINUAR
+                [E] / [ESPACIO] · CONTINUAR
               </span>
               {dialogModal.primary && (
                 <button
